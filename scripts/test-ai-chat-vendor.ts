@@ -16,8 +16,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
-import { createAgentUIStreamResponse, type UIMessage } from 'ai';
+import type { ModelMessage } from 'ai';
 
 import { loadEnvFile, getSupabaseUrl, getServiceRoleKey, isPlaceholderApiKey } from '../test/helpers/env';
 import {
@@ -29,64 +31,26 @@ import { createCRMAgent } from '../lib/ai/crmAgent';
 
 type Provider = 'google' | 'openai' | 'anthropic';
 
+type TurnReport = {
+	label: string;
+	userPrompt: string;
+	expectTool?: string;
+	calls: string[];
+	preview?: string;
+	fallbackUsed: boolean;
+	fallbackPrompt?: string;
+	fallbackCalls?: string[];
+	fallbackPreview?: string;
+};
+
 function toBool(v: unknown): boolean {
 	return String(v || '').toLowerCase() === 'true';
 }
 
-function toUIMessage(role: 'user' | 'assistant', content: string): UIMessage {
-	return {
-		id: randomUUID(),
-		role,
-		content,
-		parts: [{ type: 'text', text: content }],
-	} as unknown as UIMessage;
-}
-
-async function readAIStream(res: Response): Promise<{ raw: string; textPreview: string }> {
-	const reader = res.body?.getReader();
-	if (!reader) return { raw: '', textPreview: '' };
-
-	const decoder = new TextDecoder();
-	let raw = '';
-	let buffered = '';
-	let textPreview = '';
-
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		const chunk = decoder.decode(value);
-		raw += chunk;
-		buffered += chunk;
-
-		// Parse SSE-ish: linhas "data: {json}"
-		let idx: number;
-		while ((idx = buffered.indexOf('\n')) >= 0) {
-			const line = buffered.slice(0, idx).trimEnd();
-			buffered = buffered.slice(idx + 1);
-
-			if (!line.startsWith('data:')) continue;
-			const payload = line.slice('data:'.length).trim();
-			if (!payload) continue;
-
-			try {
-				const evt = JSON.parse(payload);
-				const maybeText =
-					(typeof (evt as any).text === 'string' && (evt as any).text) ||
-					(typeof (evt as any).delta === 'string' && (evt as any).delta) ||
-					(typeof (evt as any).content === 'string' && (evt as any).content) ||
-					'';
-
-				if (maybeText) textPreview = (textPreview + maybeText).slice(-1200);
-			} catch {
-				// ignore
-			}
-		}
-	}
-
-	return {
-		raw,
-		textPreview: textPreview.trim() || raw.trim().slice(0, 600),
-	};
+function toModelMessage(role: 'user' | 'assistant', content: string): ModelMessage {
+	// ModelMessage é o formato que o ToolLoopAgent consome diretamente.
+	// Mantemos o conteúdo como string para simplificar (sem multimodal).
+	return { role, content };
 }
 
 async function resolveOrgAISettings(supabaseUrl: string, serviceRoleKey: string, organizationId: string) {
@@ -130,7 +94,7 @@ async function runTurn(params: {
 	apiKey: string;
 	modelId: string;
 	provider: Provider;
-	messages: UIMessage[];
+	messages: ModelMessage[];
 	context: Record<string, unknown>;
 	label: string;
 	toolCallsBefore: number;
@@ -147,34 +111,47 @@ async function runTurn(params: {
 			params.provider,
 		);
 
-		const res = createAgentUIStreamResponse({
-			agent,
-			uiMessages: params.messages,
-			options: params.context as any,
-		});
-
-		const parsed = await readAIStream(res);
-
 		const g = globalThis as any;
-		const calls: string[] = Array.isArray(g.__AI_TOOL_CALLS__) ? g.__AI_TOOL_CALLS__.slice(params.toolCallsBefore) : [];
+		let textPreview = '';
+		let raw = '';
+		let error: unknown = null;
 
-		const rawLower = parsed.raw.toLowerCase();
+		try {
+			const result = await agent.generate({
+				messages: params.messages,
+				options: params.context as any,
+			});
+			textPreview = String((result as any)?.text ?? '').trim();
+		} catch (e) {
+			error = e;
+			raw = String((e as any)?.message ?? e ?? '').trim();
+			textPreview = raw;
+		}
+
+		const calls: string[] = Array.isArray(g.__AI_TOOL_CALLS__) ? g.__AI_TOOL_CALLS__.slice(params.toolCallsBefore) : [];
+		const rawLower = raw.toLowerCase();
 		const retryable =
-			!res.ok ||
-			rawLower.includes('server_error') ||
-			rawLower.includes('temporary') ||
-			rawLower.includes('timeout') ||
-			rawLower.includes('econnreset') ||
-			rawLower.includes('502') ||
-			rawLower.includes('503') ||
-			rawLower.includes('504');
+			!!error &&
+			(rawLower.includes('server_error') ||
+				rawLower.includes('help.openai.com') ||
+				rawLower.includes('request id req_') ||
+				rawLower.includes('an error occurred while processing your request') ||
+				rawLower.includes('failed after') ||
+				rawLower.includes('temporary') ||
+				rawLower.includes('timeout') ||
+				rawLower.includes('econnreset') ||
+				rawLower.includes('rate') ||
+				rawLower.includes('429') ||
+				rawLower.includes('502') ||
+				rawLower.includes('503') ||
+				rawLower.includes('504'));
 
 		// Evita re-tentar quando já houve side effects via tools.
 		if (retryable && calls.length === 0 && attempt < maxRetries) {
 			const waitMs = Math.min(10_000, 750 * 2 ** attempt);
 			console.warn(`\n⚠️ Provider instável (tentativa ${attempt + 1}/${maxRetries + 1}). Re-tentando em ${waitMs}ms...`);
 			await new Promise((r) => setTimeout(r, waitMs));
-			last = { ...parsed, calls, retryNote: 'retry' };
+			last = { raw, textPreview, calls, retryNote: 'retry' };
 			continue;
 		}
 
@@ -182,12 +159,12 @@ async function runTurn(params: {
 		console.log(`🧑‍💼 Vendedor: ${params.label}`);
 		console.log(`🛠️ Tools chamadas: ${calls.length ? calls.join(', ') : '(nenhuma)'} `);
 
-		if (parsed.textPreview) {
-			const preview = parsed.textPreview.replace(/\s+/g, ' ').trim();
+		if (textPreview) {
+			const preview = textPreview.replace(/\s+/g, ' ').trim();
 			console.log(`🤖 Resposta (preview): ${preview.slice(0, 420)}${preview.length > 420 ? '…' : ''}`);
 		}
 
-		return { ...parsed, calls, retryNote: attempt ? `retry:${attempt}` : undefined };
+		return { raw, textPreview, calls, retryNote: attempt ? `retry:${attempt}` : undefined };
 	}
 
 	return last ?? { raw: '', textPreview: '', calls: [] };
@@ -214,9 +191,10 @@ async function main() {
 		throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL e/ou SUPABASE_SERVICE_ROLE_KEY (configure em .env.local).');
 	}
 
-	// Para cobrir assignDeal, tentamos usar 2 usuários na mesma org.
-	// Se seu ambiente tiver poucas contas, ajuste SALES_CHAT_MIN_USERS (ex.: 1) e aceite que assignDeal não será coberto.
-	const desiredMinUsers = Number(process.env.SALES_CHAT_MIN_USERS || 2);
+	// Para cobrir assignDeal, precisamos de 2 usuários na mesma org.
+	// Em muitos ambientes locais só existe 1 usuário, então o default é 1.
+	// Para tentar cobrir assignDeal, rode com SALES_CHAT_MIN_USERS=2.
+	const desiredMinUsers = Number(process.env.SALES_CHAT_MIN_USERS || 1);
 	const wantAssignDeal = desiredMinUsers >= 2;
 
 	const prevMinUsers = process.env.SALES_TEAM_MIN_USERS;
@@ -246,6 +224,8 @@ async function main() {
 		const other = wantAssignDeal ? fx.users[1] : null;
 		const board = fx.boardsByUserId[seller.userId];
 		const bundle = fx.dealsByUserId[seller.userId];
+		const tomorrowIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+		const twoDaysFromNowIso = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
 
 		const { provider, apiKey, modelId } = await resolveOrgAISettings(supabaseUrl, serviceRoleKey, fx.organizationId);
 
@@ -267,60 +247,264 @@ async function main() {
 			userRole: seller.role,
 		};
 
-		const messages: UIMessage[] = [];
+		const messages: ModelMessage[] = [];
+		const turns: TurnReport[] = [];
 
-		const script: Array<{ label: string; user: string }> = [
-			{ label: 'Analise meu pipeline', user: 'Analise meu pipeline desse board e me diga pontos de atenção.' },
-			{ label: 'Métricas do board', user: 'Quais são as métricas desse board agora?' },
-			{ label: 'Buscar deals (Yahoo)', user: `Busque deals com "${fx.runId.split('_')[0]}" no título.` },
-			{ label: 'Buscar contatos (email fixture)', user: `Procure contatos com o email ${bundle.contactEmail}.` },
-			{ label: 'Deals por estágio', user: 'Quantos deals eu tenho no estágio Novo?' },
-			{ label: 'Deals parados', user: 'Quais deals estão parados há mais de 7 dias?' },
-			{ label: 'Deals atrasados', user: 'Quais deals têm atividades atrasadas?' },
-			{ label: 'Detalhes do deal', user: 'Me dê os detalhes do deal atual.' },
-			{ label: 'Mover para Proposta', user: 'Mova esse deal para o estágio Proposta.' },
-			{ label: 'Criar deal Yahoo', user: `Crie um deal chamado Yahoo ${fx.runId} com valor 5000 e contato "Yahoo".` },
-			{ label: 'Atualizar deal', user: `Atualize o título desse deal para "Yahoo - Renovação ${fx.runId}".` },
-			{ label: 'Criar tarefa', user: 'Crie uma tarefa para eu ligar amanhã sobre esse deal.' },
-			{ label: 'Listar atividades', user: 'Liste minhas atividades desse deal.' },
-			{ label: 'Reagendar atividade', user: 'Reagende a próxima atividade pendente para depois de amanhã.' },
-			{ label: 'Completar atividade', user: 'Marque essa atividade como concluída.' },
-			{ label: 'Logar atividade', user: 'Registre uma ligação realizada agora para esse deal.' },
-			{ label: 'Adicionar nota', user: 'Adicione uma nota nesse deal: "Cliente pediu proposta atualizada".' },
-			{ label: 'Listar notas', user: 'Liste as notas desse deal.' },
-			{ label: 'Criar contato', user: `Crie um contato Maria Yahoo ${fx.runId} com email maria.${fx.runId}@example.com e telefone 11999990000.` },
-			{ label: 'Buscar contato Maria', user: `Procure contatos com "maria.${fx.runId}@example.com".` },
+		type ScriptStep = {
+			label: string;
+			user: string;
+			userHuman?: string;
+			expectTool?: string;
+			fallbackUser?: string;
+		};
+
+		const humanPrompts = toBool(process.env.SALES_CHAT_HUMAN_PROMPTS);
+		const humanTag = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19); // "2025-12-17T15-44-15"
+
+		let script: ScriptStep[] = [
+			{
+				label: 'Analise meu pipeline',
+				user: 'Analise meu pipeline desse board e me diga pontos de atenção.',
+				expectTool: 'analyzePipeline',
+				fallbackUser: `Execute analyzePipeline com boardId: ${board.boardId}. Sem texto extra.`,
+			},
+			{
+				label: 'Métricas do board',
+				user: 'Quais são as métricas desse board agora?',
+				expectTool: 'getBoardMetrics',
+				fallbackUser: `Execute getBoardMetrics com boardId: ${board.boardId}.`,
+			},
+			{
+				label: 'Buscar deals (Yahoo)',
+				user: `Busque deals com "${fx.runId.split('_')[0]}" no título.`,
+				expectTool: 'searchDeals',
+				fallbackUser: `Execute searchDeals com query: "${fx.runId.split('_')[0]}" e limit: 5.`,
+			},
+			{
+				label: 'Buscar contatos (email fixture)',
+				user: `Procure contatos com o email ${bundle.contactEmail}.`,
+				expectTool: 'searchContacts',
+				fallbackUser: `Execute searchContacts com query: "${bundle.contactEmail}" e limit: 5.`,
+			},
+			{
+				label: 'Deals por estágio',
+				user: 'Quantos deals eu tenho no estágio Novo?',
+				expectTool: 'listDealsByStage',
+				fallbackUser: `Execute listDealsByStage com boardId: ${board.boardId} e stageId: ${board.stageIds.novo} e limit: 10.`,
+			},
+			{
+				label: 'Deals parados',
+				user:
+					`Use a tool listStagnantDeals agora, com boardId: ${board.boardId}, daysStagnant: 7, limit: 10. ` +
+					`Não faça perguntas e não explique; apenas execute a tool e traga o resultado.`,
+				expectTool: 'listStagnantDeals',
+				fallbackUser:
+					`Execute listStagnantDeals imediatamente com boardId: ${board.boardId}, daysStagnant: 1, limit: 10. ` +
+					`Sem texto extra.`,
+			},
+			{
+				label: 'Deals atrasados',
+				user: 'Quais deals têm atividades atrasadas?',
+				expectTool: 'listOverdueDeals',
+				fallbackUser: `Execute listOverdueDeals com boardId: ${board.boardId} e limit: 10.`,
+			},
+			{
+				label: 'Detalhes do deal',
+				user: 'Me dê os detalhes do deal atual.',
+				expectTool: 'getDealDetails',
+				fallbackUser: `Execute getDealDetails com dealId: ${bundle.openDealId}.`,
+			},
+			{
+				label: 'Mover para Proposta',
+				user: `Mova o deal (dealId: ${bundle.openDealId}) para o estágio Proposta (stageId: ${board.stageIds.proposta}). Use moveDeal.`,
+				userHuman: 'Move o deal atual para o estágio Proposta.',
+				expectTool: 'moveDeal',
+				fallbackUser: `Execute moveDeal com dealId: ${bundle.openDealId} e stageId: ${board.stageIds.proposta}.`,
+			},
+			{
+				label: 'Criar deal Yahoo',
+				user: `Crie um deal chamado Yahoo ${fx.runId} com valor 5000 e contato "Yahoo".`,
+				userHuman: `Crie um deal chamado "Yahoo ${humanTag}" com valor 5000 e contato "Yahoo".`,
+				expectTool: 'createDeal',
+				fallbackUser: `Execute createDeal com title: "Yahoo ${fx.runId}", value: 5000 e contactName: "Yahoo".`,
+			},
+			{
+				label: 'Atualizar deal',
+				user:
+					`Atualize o deal (dealId: ${bundle.openDealId}) definindo o title para "AI Tools Deal Open - Renovação ${fx.runId}". ` +
+					'Use updateDeal e não peça confirmação.',
+				userHuman: `Atualize o título do deal atual para "Renovação (Yahoo) ${humanTag}".`,
+				expectTool: 'updateDeal',
+				fallbackUser:
+					`Execute updateDeal com dealId: ${bundle.openDealId} e title: "AI Tools Deal Open - Renovação ${fx.runId}". ` +
+					'Agora.',
+			},
+			{
+				label: 'Criar tarefa',
+				user: `Crie uma tarefa (title: "Ligar amanhã - follow-up", dueDate: ${tomorrowIso}, type: CALL, dealId: ${bundle.openDealId}). Use createTask.`,
+				userHuman: 'Crie uma tarefa de ligação para amanhã chamada "Ligar amanhã - follow-up" para o deal atual.',
+				expectTool: 'createTask',
+				fallbackUser: `Execute createTask com title: "Ligar amanhã - follow-up", dueDate: "${tomorrowIso}", type: "CALL" e dealId: "${bundle.openDealId}".`,
+			},
+			{
+				label: 'Listar atividades',
+				user: 'Liste minhas atividades desse deal.',
+				expectTool: 'listActivities',
+				fallbackUser: `Execute listActivities com dealId: ${bundle.openDealId}.`,
+			},
+			{
+				label: 'Reagendar atividade',
+				user: `Reagende a atividade (activityId: ${bundle.futureActivityId}) para newDate ${twoDaysFromNowIso}. Use rescheduleActivity.`,
+				userHuman: `Reagende a próxima atividade desse deal para daqui a 2 dias.`,
+				expectTool: 'rescheduleActivity',
+				fallbackUser: `Execute rescheduleActivity com activityId: ${bundle.futureActivityId} e newDate: "${twoDaysFromNowIso}".`,
+			},
+			{
+				label: 'Completar atividade',
+				user: `Marque como concluída a atividade (activityId: ${bundle.overdueActivityId}). Use completeActivity.`,
+				userHuman: 'Marque como concluída a atividade atrasada desse deal.',
+				expectTool: 'completeActivity',
+				fallbackUser: `Execute completeActivity com activityId: ${bundle.overdueActivityId}.`,
+			},
+			{
+				label: 'Logar atividade',
+				user: 'Registre uma ligação realizada agora para esse deal.',
+				expectTool: 'logActivity',
+				fallbackUser: `Execute logActivity com dealId: ${bundle.openDealId} e type: "CALL" e title: "Ligação realizada".`,
+			},
+			{
+				label: 'Adicionar nota',
+				user: 'Adicione uma nota nesse deal: "Cliente pediu proposta atualizada".',
+				expectTool: 'addDealNote',
+				fallbackUser: `Execute addDealNote com dealId: ${bundle.openDealId} e note: "Cliente pediu proposta atualizada".`,
+			},
+			{
+				label: 'Listar notas',
+				user: 'Liste as notas desse deal.',
+				expectTool: 'listDealNotes',
+				fallbackUser: `Execute listDealNotes com dealId: ${bundle.openDealId} e limit: 10.`,
+			},
+			{
+				label: 'Criar contato',
+				user: `Crie um contato Maria Yahoo ${fx.runId} com email maria.${fx.runId}@example.com e telefone 11999990000.`,
+				userHuman: `Crie um novo contato da Maria Yahoo (email maria.${humanTag}@example.com, tel 11999990000).`,
+				expectTool: 'createContact',
+				fallbackUser: `Execute createContact com name: "Maria Yahoo ${fx.runId}", email: "maria.${fx.runId}@example.com" e phone: "11999990000".`,
+			},
+			{
+				label: 'Buscar contato Maria',
+				user: `Procure contatos com "maria.${fx.runId}@example.com".`,
+				userHuman: `Procure o contato da Maria pelo email maria.${humanTag}@example.com.`,
+				expectTool: 'searchContacts',
+				fallbackUser: `Execute searchContacts com query: "maria.${fx.runId}@example.com" e limit: 5.`,
+			},
 			{
 				label: 'Detalhar contato',
 				user: `Mostre detalhes do contato (contactId: ${bundle.contactId}).`,
+				userHuman: 'Mostre os detalhes do contato principal (o lead que estamos usando).',
+				expectTool: 'getContactDetails',
+				fallbackUser: `Execute getContactDetails com contactId: ${bundle.contactId}.`,
 			},
 			{
 				label: 'Atualizar contato',
-				user: `Atualize as observações do contato (contactId: ${bundle.contactId}) para "Lead quente".`,
+				user:
+					`Use updateContact agora com contactId: ${bundle.contactId} e notes: "Lead quente (${fx.runId})". ` +
+					`Não altere email/telefone/nome e não peça confirmação em texto.`,
+				userHuman: `Atualize as notas do contato principal para "Lead quente (${humanTag})" sem alterar os outros campos.`,
+				expectTool: 'updateContact',
+				fallbackUser:
+					`Se precisar, use getContactDetails (contactId: ${bundle.contactId}) e em seguida execute updateContact ` +
+					`com contactId: ${bundle.contactId} e notes: "Lead quente (${fx.runId})". Sem perguntas.`,
 			},
 			{
 				label: 'Link deal -> contato',
-				user: `Vincule o deal (dealId: ${bundle.openDealId}) ao contato (contactId: ${bundle.contactId}).`,
+				user:
+					`Vincule o deal (dealId: ${bundle.openDealId}) ao contato (contactId: ${bundle.contactId}). ` +
+					'Use linkDealToContact e não pergunte nada.',
+				expectTool: 'linkDealToContact',
+				fallbackUser:
+					`Execute linkDealToContact com dealId: ${bundle.openDealId} e contactId: ${bundle.contactId}. ` +
+					'Agora.',
 			},
 			{
 				label: 'Bulk move',
 				user: `Mova em lote (bulk) os deals [${bundle.openDealId}, ${bundle.lostDealId}] para o estágio Proposta (stageId: ${board.stageIds.proposta}). Use moveDealsBulk.`,
+				userHuman: 'Mova em lote dois deals (o aberto e o que vai virar perdido) para Proposta.',
+				expectTool: 'moveDealsBulk',
+				fallbackUser: `Execute moveDealsBulk com dealIds: ["${bundle.openDealId}", "${bundle.lostDealId}"] e stageId: "${board.stageIds.proposta}".`,
 			},
-			{ label: 'Listar estágios', user: 'Liste os estágios desse board.' },
-			{ label: 'Atualizar estágio', user: 'Atualize o label do estágio Proposta para "Proposta Enviada".' },
+			{
+				label: 'Listar estágios',
+				user: 'Liste os estágios desse board.',
+				expectTool: 'listStages',
+				fallbackUser: `Execute listStages com boardId: ${board.boardId}.`,
+			},
+			{
+				label: 'Atualizar estágio',
+				user: 'Atualize o label do estágio Proposta para "Proposta Enviada".',
+				expectTool: 'updateStage',
+				fallbackUser: `Execute updateStage com stageId: ${board.stageIds.proposta} e label: "Proposta Enviada".`,
+			},
 			{
 				label: 'Reordenar estágios',
-				user: `Reordene os estágios do board usando orderedStageIds exatamente nesta ordem: [${board.stageIds.novo}, ${board.stageIds.proposta}, ${board.stageIds.ganho}, ${board.stageIds.perdido}].`,
+				user:
+					`Reordene os estágios do board usando orderedStageIds exatamente nesta ordem: ` +
+					`[${board.stageIds.novo}, ${board.stageIds.proposta}, ${board.stageIds.ganho}, ${board.stageIds.perdido}]. ` +
+					'Use APENAS a tool reorderStages e não execute nenhuma outra tool.',
+				userHuman: 'Reordene os estágios do funil para: Novo → Proposta → Ganho → Perdido.',
+				expectTool: 'reorderStages',
+				fallbackUser:
+					`Chame APENAS reorderStages agora com { ` +
+					`boardId: "${board.boardId}", ` +
+					`orderedStageIds: ["${board.stageIds.novo}", "${board.stageIds.proposta}", "${board.stageIds.ganho}", "${board.stageIds.perdido}"] ` +
+					`}. Sem texto extra.`,
 			},
 			{
 				label: 'Marcar como ganho',
 				user: `Marque como ganho o deal (dealId: ${bundle.wonDealId}) com wonValue 2000.`,
+				userHuman: 'Marque como ganho o deal que estava como WonCandidate com valor final 2000.',
+				expectTool: 'markDealAsWon',
+				fallbackUser: `Execute markDealAsWon com dealId: ${bundle.wonDealId} e wonValue: 2000.`,
 			},
 			{
 				label: 'Marcar como perdido',
 				user: `Marque como perdido o deal (dealId: ${bundle.lostDealId}) com reason "Preço".`,
+				userHuman: 'Marque como perdido o deal que estava como LostCandidate com motivo "Preço".',
+				expectTool: 'markDealAsLost',
+				fallbackUser: `Execute markDealAsLost com dealId: ${bundle.lostDealId} e reason: "Preço".`,
 			},
 		];
+
+		// Permite rodar um subconjunto das etapas para depuração.
+		// Ex.: SALES_CHAT_ONLY_LABELS="Buscar contato Maria" ou SALES_CHAT_ONLY_LABELS="Atualizar estágio"
+		const onlyLabelsRaw = String(process.env.SALES_CHAT_ONLY_LABELS || '').trim();
+		if (onlyLabelsRaw) {
+			const requested = new Set(
+				onlyLabelsRaw
+					.split(',')
+					.map((s) => s.trim())
+					.filter(Boolean),
+			);
+
+			// Pré-requisitos mínimos para reproduzir fielmente o cenário de certas etapas.
+			// - "Buscar contato Maria" depende do contato Maria ter sido criado na etapa anterior.
+			if (requested.has('Buscar contato Maria')) requested.add('Criar contato');
+			// - "Atualizar estágio" fica mais estável se o agente tiver listado estágios antes.
+			if (requested.has('Atualizar estágio')) requested.add('Listar estágios');
+
+			script = script.filter((s) => requested.has(s.label));
+			if (script.length === 0) {
+				throw new Error(
+					`SALES_CHAT_ONLY_LABELS foi definido, mas nenhuma etapa foi encontrada. ` +
+					`Labels disponíveis incluem: ${[
+						'Buscar contato Maria',
+						'Atualizar estágio',
+						'Criar contato',
+						'Listar estágios',
+					].join(', ')}`,
+				);
+			}
+		}
 
 		if (wantAssignDeal && other) {
 			script.push({ label: 'Reatribuir deal', user: `Reatribua esse deal para outro responsável (userId: ${other.userId}).` });
@@ -329,7 +513,11 @@ async function main() {
 		const allToolsDetected = new Set<string>();
 
 		for (const step of script) {
-			messages.push(toUIMessage('user', step.user));
+			// Envia o prompt do usuário desta etapa para o agente.
+			// Sem isso, a primeira chamada pode falhar com "messages must not be empty"
+			// e as etapas seguintes ficam sem contexto (o agente só veria placeholders).
+			const effectiveUserPrompt = humanPrompts && step.userHuman ? step.userHuman : step.user;
+			messages.push(toModelMessage('user', effectiveUserPrompt));
 
 			const g = globalThis as any;
 			const before = Array.isArray(g.__AI_TOOL_CALLS__) ? g.__AI_TOOL_CALLS__.length : 0;
@@ -346,7 +534,43 @@ async function main() {
 			});
 
 			parsed.calls.forEach((t) => allToolsDetected.add(t));
-			messages.push(toUIMessage('assistant', parsed.textPreview || ''));
+			// Evita que outputs longos (JSON / tool results) contaminem as próximas decisões do modelo.
+			messages.push(toModelMessage('assistant', '(ok)'));
+
+			const turn: TurnReport = {
+				label: step.label,
+				userPrompt: effectiveUserPrompt,
+				expectTool: step.expectTool,
+				calls: parsed.calls,
+				preview: parsed.textPreview ? parsed.textPreview.replace(/\s+/g, ' ').trim().slice(0, 420) : undefined,
+				fallbackUsed: false,
+			};
+
+			if (step.expectTool && !parsed.calls.includes(step.expectTool) && step.fallbackUser) {
+				messages.push(toModelMessage('user', step.fallbackUser));
+				const beforeFallback = Array.isArray(g.__AI_TOOL_CALLS__) ? g.__AI_TOOL_CALLS__.length : 0;
+				const parsedFallback = await runTurn({
+					userId: seller.userId,
+					apiKey,
+					modelId,
+					provider,
+					messages,
+					context,
+					label: `${step.label} (fallback)`,
+					toolCallsBefore: beforeFallback,
+				});
+				parsedFallback.calls.forEach((t) => allToolsDetected.add(t));
+				messages.push(toModelMessage('assistant', '(ok)'));
+
+				turn.fallbackUsed = true;
+				turn.fallbackPrompt = step.fallbackUser;
+				turn.fallbackCalls = parsedFallback.calls;
+				turn.fallbackPreview = parsedFallback.textPreview
+					? parsedFallback.textPreview.replace(/\s+/g, ' ').trim().slice(0, 420)
+					: undefined;
+			}
+
+			turns.push(turn);
 
 			await new Promise((r) => setTimeout(r, 400));
 		}
@@ -399,9 +623,66 @@ async function main() {
 		if (missing.length) {
 			console.log(`\n⚠️ Tools NÃO detectadas no chat (${missing.length}): ${missing.join(', ')}`);
 			console.log('Dica: como o modelo decide o plano, pode variar. Ajuste o roteiro/linguagem das prompts para forçar chamadas.');
-			process.exitCode = 2;
+			// Se estivermos rodando apenas um subconjunto (debug), é esperado não cobrir tudo.
+			if (!onlyLabelsRaw) process.exitCode = 2;
 		} else {
 			console.log('\n✅ Todas as tools foram detectadas via chat.');
+		}
+
+		// Relatório em Markdown (útil para “cadê a bateria de testes?”)
+		try {
+			const baseDir = path.join(process.cwd(), 'testsprite_tests', 'tmp');
+			await mkdir(baseDir, { recursive: true });
+			const reportPath =
+				process.env.AI_CHAT_REPORT_PATH?.trim() ||
+				path.join(baseDir, `ai-chat-vendor-report.${fx.runId}.${new Date().toISOString().replace(/[:.]/g, '-')}.md`);
+
+			const now = new Date();
+			const lines: string[] = [];
+			lines.push(`# Relatório — AI Chat (vendedor)\n`);
+			lines.push(`- Data: ${now.toISOString()}\n`);
+			lines.push(`- Org: ${fx.organizationId}`);
+			lines.push(`- Usuário: ${seller.email} (${seller.userId})`);
+			lines.push(`- Board: ${board.boardId}`);
+			lines.push(`- Provider/Model: ${provider} / ${modelId}`);
+			lines.push(`- RUN_REAL_AI: ${String(process.env.RUN_REAL_AI)}`);
+			lines.push('');
+
+			lines.push(`## Cobertura\n`);
+			lines.push(`- Tools detectadas (${allToolsDetected.size}): ${Array.from(allToolsDetected).sort().join(', ')}`);
+			lines.push(`- Tools NÃO detectadas (${missing.length}): ${missing.length ? missing.join(', ') : '(nenhuma)'}`);
+			lines.push('');
+
+			lines.push('## Execução por etapa\n');
+			lines.push('| Etapa | Tool esperada | Tools chamadas | Fallback? |');
+			lines.push('| --- | --- | --- | --- |');
+			for (const t of turns) {
+				const called = [...(t.calls || []), ...((t.fallbackCalls || []) as string[])].filter(Boolean);
+				const calledUnique = Array.from(new Set(called));
+				lines.push(
+					`| ${t.label.replace(/\|/g, '\\|')} | ${t.expectTool ?? ''} | ${calledUnique.join(', ')} | ${t.fallbackUsed ? 'sim' : 'não'} |`,
+				);
+			}
+			lines.push('');
+
+			lines.push('## Prompts (para auditoria)\n');
+			for (const t of turns) {
+				lines.push(`### ${t.label}\n`);
+				lines.push(`**User prompt:** ${t.userPrompt}`);
+				lines.push(`\n**Tools chamadas:** ${t.calls.length ? t.calls.join(', ') : '(nenhuma)'}`);
+				if (t.preview) lines.push(`\n**Preview:** ${t.preview}`);
+				if (t.fallbackUsed) {
+					lines.push(`\n**Fallback prompt:** ${t.fallbackPrompt}`);
+					lines.push(`\n**Tools no fallback:** ${t.fallbackCalls?.length ? t.fallbackCalls.join(', ') : '(nenhuma)'}`);
+					if (t.fallbackPreview) lines.push(`\n**Preview fallback:** ${t.fallbackPreview}`);
+				}
+				lines.push('');
+			}
+
+			await writeFile(reportPath, lines.join('\n'), 'utf8');
+			console.log(`\n🧾 Relatório salvo em: ${reportPath}`);
+		} catch (e) {
+			console.warn('⚠️ Não consegui salvar o relatório (best-effort):', e);
 		}
 	} finally {
 		if (fx) await cleanupSalesTeamFixtures(fx);
