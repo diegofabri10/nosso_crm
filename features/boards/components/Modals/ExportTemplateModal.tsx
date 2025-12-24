@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Copy, Download, ArrowUp, ArrowDown } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import type { Board, JourneyDefinition, RegistryTemplate } from '@/types';
@@ -106,6 +106,25 @@ export function ExportTemplateModal(props: {
 
   // Selected boards for journey (keep order)
   const [selectedBoardIds, setSelectedBoardIds] = useState<string[]>(() => [activeBoard.id]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    // UX: normalize persisted selection order on open to match the visible list order.
+    // This prevents confusing exports where an older "selection order" lingers across opens.
+    const orderIndex = new Map<string, number>();
+    for (let i = 0; i < boards.length; i += 1) {
+      orderIndex.set(boards[i].id, i);
+    }
+    const allowed = new Set<string>(boards.map(b => b.id));
+
+    setSelectedBoardIds(prev => {
+      const unique = Array.from(new Set([...prev, activeBoard.id]));
+      return unique
+        .filter(id => allowed.has(id))
+        .sort((a, b) => (orderIndex.get(a) ?? Number.POSITIVE_INFINITY) - (orderIndex.get(b) ?? Number.POSITIVE_INFINITY));
+    });
+  }, [isOpen, boards, activeBoard.id]);
 
   const selectedBoards = useMemo(() => {
     const byId = new Map(boards.map(b => [b.id, b]));
