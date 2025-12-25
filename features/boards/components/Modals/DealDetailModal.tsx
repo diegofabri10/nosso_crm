@@ -106,6 +106,10 @@ export const DealDetailModal: React.FC<DealDetailModalProps> = ({ dealId, isOpen
 
   const [selectedProductId, setSelectedProductId] = useState('');
   const [productQuantity, setProductQuantity] = useState(1);
+  const [showCustomItem, setShowCustomItem] = useState(false);
+  const [customItemName, setCustomItemName] = useState('');
+  const [customItemPrice, setCustomItemPrice] = useState<string>('0');
+  const [customItemQuantity, setCustomItemQuantity] = useState(1);
 
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [showLossReasonModal, setShowLossReasonModal] = useState(false);
@@ -234,6 +238,37 @@ export const DealDetailModal: React.FC<DealDetailModalProps> = ({ dealId, isOpen
 
     setSelectedProductId('');
     setProductQuantity(1);
+  };
+
+  const handleAddCustomItem = () => {
+    const name = customItemName.trim();
+    const price = Number(customItemPrice);
+    const qty = Number(customItemQuantity);
+    if (!name) {
+      addToast('Digite o nome do item.', 'warning');
+      return;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      addToast('Preço inválido.', 'warning');
+      return;
+    }
+    if (!Number.isFinite(qty) || qty < 1) {
+      addToast('Quantidade inválida.', 'warning');
+      return;
+    }
+
+    // "Produto depende do cliente": item livre, sem product_id.
+    addItemToDeal(deal.id, {
+      productId: '', // deal_items.product_id é opcional no schema; sanitizeUUID('') => null
+      name,
+      price,
+      quantity: qty,
+    });
+
+    setCustomItemName('');
+    setCustomItemPrice('0');
+    setCustomItemQuantity(1);
+    setShowCustomItem(false);
   };
 
   const confirmDeleteDeal = () => {
@@ -703,6 +738,63 @@ export const DealDetailModal: React.FC<DealDetailModalProps> = ({ dealId, isOpen
                           Adicionar
                         </button>
                       </div>
+
+                      <div className="mt-3 flex items-center justify-between gap-3">
+                        <div className="text-xs text-slate-500 dark:text-slate-400">
+                          Produto depende do cliente? Use um item personalizado (não precisa estar no catálogo).
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowCustomItem(v => !v)}
+                          className="text-xs font-bold text-primary-600 dark:text-primary-400 hover:underline"
+                        >
+                          {showCustomItem ? 'Fechar' : 'Adicionar item personalizado'}
+                        </button>
+                      </div>
+
+                      {showCustomItem && (
+                        <div className="mt-3 rounded-xl border border-slate-200 dark:border-white/10 bg-white/60 dark:bg-white/5 p-3">
+                          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                            <div className="sm:col-span-6">
+                              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Nome do item</label>
+                              <input
+                                value={customItemName}
+                                onChange={e => setCustomItemName(e.target.value)}
+                                placeholder="Ex.: Pacote personalizado, Procedimento X…"
+                                className="w-full bg-white dark:bg-black/20 border border-slate-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary-500 dark:text-white"
+                              />
+                            </div>
+                            <div className="sm:col-span-3">
+                              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Preço</label>
+                              <input
+                                value={customItemPrice}
+                                onChange={e => setCustomItemPrice(e.target.value)}
+                                inputMode="decimal"
+                                className="w-full bg-white dark:bg-black/20 border border-slate-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary-500 dark:text-white"
+                              />
+                            </div>
+                            <div className="sm:col-span-2">
+                              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Qtd</label>
+                              <input
+                                type="number"
+                                min={1}
+                                value={customItemQuantity}
+                                onChange={e => setCustomItemQuantity(parseInt(e.target.value))}
+                                className="w-full bg-white dark:bg-black/20 border border-slate-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary-500 dark:text-white"
+                              />
+                            </div>
+                            <div className="sm:col-span-1">
+                              <button
+                                type="button"
+                                onClick={handleAddCustomItem}
+                                className="w-full bg-primary-600 hover:bg-primary-500 text-white px-3 py-2 rounded-lg text-sm font-bold transition-colors"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div className="bg-white dark:bg-white/5 border border-slate-200 dark:border-white/5 rounded-xl overflow-hidden">

@@ -181,6 +181,8 @@ export interface Product {
   description?: string;
   price: number;
   sku?: string;
+  /** Se está ativo no catálogo (itens inativos não devem aparecer no dropdown do deal). */
+  active?: boolean;
 }
 
 export interface DealItem {

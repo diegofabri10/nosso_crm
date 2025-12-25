@@ -8,7 +8,7 @@ import React, {
   ReactNode,
 } from 'react';
 import { LifecycleStage, Product, CustomFieldDefinition, Lead } from '@/types';
-import { settingsService, lifecycleStagesService } from '@/lib/supabase';
+import { settingsService, lifecycleStagesService, productsService } from '@/lib/supabase';
 import { useAuth } from '../AuthContext';
 
 const DEFAULT_LIFECYCLE_STAGES: LifecycleStage[] = [
@@ -40,8 +40,10 @@ interface SettingsContextType {
   deleteLifecycleStage: (id: string, contacts: any[]) => Promise<void>;
   reorderLifecycleStages: (newOrder: LifecycleStage[]) => Promise<void>;
 
-  // Products (TODO: migrate to Supabase)
+  // Products (Catálogo)
   products: Product[];
+  /** Recarrega o catálogo de produtos (usado para manter o dropdown do deal atualizado). */
+  refreshProducts: () => Promise<void>;
 
   // Custom Fields (TODO: migrate to Supabase)
   customFieldDefinitions: CustomFieldDefinition[];
@@ -95,10 +97,23 @@ export const SettingsProvider: React.FC<{ children: ReactNode }> = ({ children }
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lifecycleStages, setLifecycleStages] = useState<LifecycleStage[]>(DEFAULT_LIFECYCLE_STAGES);
-  const [products] = useState<Product[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [customFieldDefinitions, setCustomFieldDefinitions] = useState<CustomFieldDefinition[]>([]);
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
+
+  const refreshProducts = useCallback(async () => {
+    try {
+      const res = await productsService.getActive();
+      if (res.error) {
+        console.warn('[Settings] Falha ao carregar produtos:', res.error.message);
+        return;
+      }
+      setProducts(res.data);
+    } catch (e) {
+      console.warn('[Settings] Falha ao carregar produtos:', e);
+    }
+  }, []);
 
   // AI Config state - separate keys per provider
   const [aiProvider, setAiProviderState] = useState<AIConfig['provider']>('google');
@@ -174,6 +189,9 @@ export const SettingsProvider: React.FC<{ children: ReactNode }> = ({ children }
       if (stages && stages.length > 0) {
         setLifecycleStages(stages);
       }
+
+      // Fetch products catalog (active only)
+      await refreshProducts();
     } catch (e) {
       console.error('Error fetching settings:', e);
       setError(e instanceof Error ? e.message : 'Failed to fetch settings');
@@ -185,6 +203,16 @@ export const SettingsProvider: React.FC<{ children: ReactNode }> = ({ children }
   useEffect(() => {
     fetchSettings();
   }, [fetchSettings]);
+
+  // Allow UIs (ex.: Settings → Produtos) to notify the app to reload the catalog.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handler = () => {
+      refreshProducts();
+    };
+    window.addEventListener('crm:products-updated', handler as any);
+    return () => window.removeEventListener('crm:products-updated', handler as any);
+  }, [refreshProducts]);
 
   // Lifecycle Stages CRUD
   const addLifecycleStage = useCallback(
@@ -390,6 +418,7 @@ export const SettingsProvider: React.FC<{ children: ReactNode }> = ({ children }
       deleteLifecycleStage,
       reorderLifecycleStages,
       products,
+      refreshProducts,
       customFieldDefinitions,
       addCustomField,
       updateCustomField,
@@ -430,6 +459,7 @@ export const SettingsProvider: React.FC<{ children: ReactNode }> = ({ children }
       deleteLifecycleStage,
       reorderLifecycleStages,
       products,
+      refreshProducts,
       customFieldDefinitions,
       addCustomField,
       updateCustomField,

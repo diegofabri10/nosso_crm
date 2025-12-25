@@ -8,6 +8,7 @@ import { ApiKeysSection } from './components/ApiKeysSection';
 import { WebhooksSection } from './components/WebhooksSection';
 import { AIConfigSection } from './components/AIConfigSection';
 import { DataStorageSettings } from './components/DataStorageSettings';
+import { ProductsCatalogManager } from './components/ProductsCatalogManager';
 
 import { UsersPage } from './UsersPage';
 import { useAuth } from '@/context/AuthContext';
@@ -87,6 +88,8 @@ const GeneralSettings: React.FC<GeneralSettingsProps> = ({ hash, isAdmin }) => {
             onSaveField={controller.handleSaveField}
             onRemoveField={controller.removeCustomField}
           />
+
+          <ProductsCatalogManager />
 
           <ApiKeysSection />
 
