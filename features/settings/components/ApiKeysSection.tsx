@@ -32,9 +32,13 @@ export const ApiKeysSection: React.FC = () => {
   const [createdPrefix, setCreatedPrefix] = useState<string | null>(null);
   const [testLoading, setTestLoading] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [boards, setBoards] = useState<Array<{ id: string; key: string | null; name: string }>>([]);
+  const [boardsLoading, setBoardsLoading] = useState(false);
+  const [selectedBoardKey, setSelectedBoardKey] = useState<string>('');
 
   const openApiUrl = useMemo(() => '/api/public/v1/openapi.json', []);
   const meUrl = useMemo(() => '/api/public/v1/me', []);
+  const boardsUrl = useMemo(() => '/api/public/v1/boards?limit=250', []);
 
   const copy = async (label: string, value: string) => {
     try {
@@ -140,6 +144,33 @@ export const ApiKeysSection: React.FC = () => {
     }
   };
 
+  const loadBoardsViaApi = async () => {
+    if (!createdToken) return;
+    setBoardsLoading(true);
+    try {
+      const res = await fetch(boardsUrl, {
+        headers: { 'X-Api-Key': createdToken },
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || 'Falha ao carregar boards');
+      const rows = (json?.data || []) as Array<any>;
+      setBoards(rows.map((b) => ({ id: b.id, key: b.key ?? null, name: b.name })));
+      if (!selectedBoardKey) {
+        const firstWithKey = rows.find((b) => b.key) as any;
+        if (firstWithKey?.key) setSelectedBoardKey(firstWithKey.key);
+      }
+    } catch (e: any) {
+      addToast(e?.message || 'Erro ao carregar boards', 'error');
+    } finally {
+      setBoardsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (createdToken) void loadBoardsViaApi();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createdToken]);
+
   return (
     <SettingsSection title="API (Integrações)" icon={Key}>
       <p className="text-sm text-slate-600 dark:text-slate-300 mb-4 leading-relaxed">
@@ -241,7 +272,64 @@ export const ApiKeysSection: React.FC = () => {
 
         <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4 lg:col-span-2">
           <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">
-            Passo 3 — Documentação (OpenAPI)
+            Passo 3 — Escolha seu pipeline (board)
+          </div>
+          <div className="text-xs text-slate-600 dark:text-slate-300 mb-3">
+            A integração usa a <strong>chave (slug)</strong> do board — não precisa de UUID.
+          </div>
+
+          {!createdToken ? (
+            <div className="text-sm text-slate-600 dark:text-slate-300">
+              Crie uma chave no Passo 2 para listar seus boards via API.
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 mb-2">
+                <button
+                  type="button"
+                  onClick={loadBoardsViaApi}
+                  disabled={boardsLoading}
+                  className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
+                >
+                  <RefreshCw className={`h-4 w-4 ${boardsLoading ? 'animate-spin' : ''}`} />
+                  Carregar boards via API
+                </button>
+                <div className="text-xs text-slate-500 dark:text-slate-400 font-mono">
+                  GET {boardsUrl}
+                </div>
+              </div>
+
+              <select
+                value={selectedBoardKey}
+                onChange={(e) => setSelectedBoardKey(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              >
+                <option value="">Selecione…</option>
+                {boards.map((b) => (
+                  <option key={b.id} value={b.key || ''} disabled={!b.key}>
+                    {b.name}{b.key ? ` — ${b.key}` : ' — (sem chave)'}
+                  </option>
+                ))}
+              </select>
+
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => selectedBoardKey && copy('board_key', selectedBoardKey)}
+                  disabled={!selectedBoardKey}
+                  className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 disabled:opacity-60 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
+                >
+                  <Copy className="h-4 w-4" />
+                  Copiar board_key
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4 lg:col-span-2">
+          <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">
+            Passo 4 — Documentação (OpenAPI)
           </div>
           <div className="text-xs text-slate-600 dark:text-slate-300 mb-3">
             Se você (ou o time técnico) precisar, aqui está o OpenAPI para importar em Swagger/Postman e gerar integrações.

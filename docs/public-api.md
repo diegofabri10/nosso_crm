@@ -24,6 +24,11 @@ Fluxo recomendado:
 1) Abra o CRM e copie a **Chave do board (slug)** no modal de editar/criar board.
 2) Na integração, use essa `board_key` para buscar etapas e criar/mover deals.
 
+Alternativa (via API):
+
+- `GET /api/public/v1/boards?q=vendas`
+- `GET /api/public/v1/boards/{board_key}/stages`
+
 ## Erros (padrão)
 
 O padrão de erro é:

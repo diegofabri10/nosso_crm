@@ -52,6 +52,7 @@
   - Criada a seção **Settings → Integrações → API** com foco em produto (escolher objetivo + copiar/abrir OpenAPI sem “manual feio”).
   - Adicionado guia humano em `docs/public-api.md`.
   - Adicionada base da **Public API auth**: `api_keys` (schema consolidado) + RPCs `create_api_key`, `revoke_api_key`, `validate_api_key` e endpoint `GET /api/public/v1/me`.
+  - Adicionados endpoints de **Boards**: `GET /api/public/v1/boards`, `GET /api/public/v1/boards/{boardKeyOrId}`, `GET /api/public/v1/boards/{boardKeyOrId}/stages`, e integração disso na UI (selecionar pipeline via `board_key`).
 - **Debug Mode (UX)**:
   - Debug agora é **reativo** (sem refresh): toggle dispara evento (`DEBUG_MODE_EVENT`) e `DebugFillButton` usa `useDebugMode`.
   - Fix: geração de telefone fake agora é determinística (sem `fromRegExp`, evitando `\\` no número).
