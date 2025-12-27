@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from 'react';
-import { ServerCog, Copy, ExternalLink, CheckCircle2, Play, KeyRound, TerminalSquare, AlertTriangle } from 'lucide-react';
+import React, { useMemo, useRef, useState } from 'react';
+import { ServerCog, Copy, ExternalLink, CheckCircle2, Play, TerminalSquare, AlertTriangle, RefreshCw, ChevronDown } from 'lucide-react';
 import { useOptionalToast } from '@/context/ToastContext';
+import { supabase } from '@/lib/supabase/client';
 import { SettingsSection } from './SettingsSection';
 
 /**
@@ -14,7 +15,9 @@ export const McpSection: React.FC = () => {
   const metadataUrl = '/api/mcp';
 
   const [apiKey, setApiKey] = useState('');
+  const [creatingKey, setCreatingKey] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [testResult, setTestResult] = useState<{
     ok: boolean;
     message: string;
@@ -23,6 +26,9 @@ export const McpSection: React.FC = () => {
     testedAtIso?: string;
   } | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showHaveKey, setShowHaveKey] = useState(false);
+
+  const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
 
   const origin = useMemo(() => (typeof window !== 'undefined' ? window.location.origin : ''), []);
   const fullEndpoint = useMemo(() => (origin ? `${origin}${endpointPath}` : endpointPath), [origin]);
@@ -53,6 +59,50 @@ export const McpSection: React.FC = () => {
       addToast(`${label} copiado.`, 'success');
     } catch {
       addToast(`Não foi possível copiar ${label.toLowerCase()}.`, 'error');
+    }
+  };
+
+  const copyMetadata = async () => {
+    try {
+      const res = await fetch(metadataUrl, { method: 'GET' });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json) {
+        addToast('Não foi possível obter metadata.', 'error');
+        return;
+      }
+      await copy('Metadata', JSON.stringify(json, null, 2));
+    } catch {
+      addToast('Não foi possível obter metadata.', 'error');
+    }
+  };
+
+  const createApiKeyInline = async (): Promise<string | null> => {
+    if (!supabase) {
+      addToast('Supabase não configurado neste ambiente.', 'error');
+      return null;
+    }
+
+    setCreatingKey(true);
+    try {
+      const name = `MCP ${new Date().toLocaleDateString('pt-BR')}`;
+      const { data, error } = await supabase.rpc('create_api_key', { p_name: name });
+      if (error) throw error;
+      const row = Array.isArray(data) ? data[0] : data;
+      const token = row?.token as string | undefined;
+      if (!token) throw new Error('Resposta inválida ao criar chave');
+
+      setApiKey(token);
+      setTestResult(null);
+      addToast('API key criada e preenchida. (Ela aparece só uma vez.)', 'success');
+
+      // UX: leva o foco pro campo do Passo 2.
+      setTimeout(() => apiKeyInputRef.current?.focus(), 0);
+      return token;
+    } catch (e: any) {
+      addToast(e?.message || 'Erro ao criar chave', 'error');
+      return null;
+    } finally {
+      setCreatingKey(false);
     }
   };
 
@@ -161,200 +211,152 @@ export const McpSection: React.FC = () => {
     }
   };
 
+  const connectMagic = async () => {
+    // Jobs-mode: one button. If no key, create one; then test.
+    setConnecting(true);
+    setTestResult(null);
+    try {
+      let token = apiKey.trim();
+      if (!token) {
+        const created = await createApiKeyInline();
+        token = created?.trim() || '';
+      }
+
+      if (!token) return; // errors already toasted
+
+      // Ensure input shows the key after auto-generate (and to make it feel “real”).
+      setShowHaveKey(true);
+      setTimeout(() => apiKeyInputRef.current?.focus(), 0);
+
+      await testConnection();
+    } finally {
+      setConnecting(false);
+    }
+  };
+
   return (
     <SettingsSection title="MCP" icon={ServerCog}>
       <div className="mt-4">
-        <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
-          Conecte assistentes e automações ao CRM via MCP (Model Context Protocol).
-          <br />
-          <span className="font-semibold text-slate-700 dark:text-slate-200">Compatível agora:</span> MCP Inspector e clientes MCP onde você controla headers.
-          <br />
-          <span className="font-semibold text-slate-700 dark:text-slate-200">ChatGPT:</span> exige OAuth para MCP autenticado (Fase 2).
-        </p>
-
-        {/* Status */}
-        <div className="mt-4 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4">
-          <div className="flex items-start justify-between gap-4">
+        {/* Jobs-mode hero */}
+        <div className="mt-4 rounded-2xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-5">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="min-w-0">
-              <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-1">Status</div>
-              <div className="text-sm">
-                {testResult?.ok ? (
-                  <span className="inline-flex items-center gap-2 text-emerald-700 dark:text-emerald-300 font-semibold">
-                    <CheckCircle2 className="h-4 w-4" />
-                    Conectado
-                  </span>
-                ) : testResult ? (
-                  <span className="inline-flex items-center gap-2 text-rose-700 dark:text-rose-300 font-semibold">
-                    <AlertTriangle className="h-4 w-4" />
-                    Falha no teste
-                  </span>
-                ) : (
-                  <span className="text-slate-600 dark:text-slate-300">Ainda não testado</span>
-                )}
+              <div className="text-lg font-semibold text-slate-900 dark:text-white">
+                {testResult?.ok ? 'Pronto.' : 'Conectar ao MCP'}
+              </div>
+              <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                {testResult?.ok
+                  ? 'Seu MCP está respondendo. Agora é só abrir no Inspector.'
+                  : 'Um clique: cria uma API key e testa a conexão.'}
               </div>
               <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                Endpoint: <span className="font-mono">POST {endpointPath}</span>
+                Endpoint: <span className="font-mono">{endpointPath}</span>
               </div>
-              {testResult?.testedAtIso && (
-                <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                  Último teste: {new Date(testResult.testedAtIso).toLocaleString('pt-BR')}
-                </div>
-              )}
-              {testResult?.ok && typeof testResult.toolsCount === 'number' && (
-                <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                  Tools disponíveis: <span className="font-semibold text-slate-700 dark:text-slate-200">{testResult.toolsCount}</span>
-                </div>
-              )}
             </div>
 
-            <div className="flex flex-wrap gap-2 justify-end">
+            <div className="flex flex-wrap gap-2">
+              {!testResult?.ok ? (
+                <button
+                  type="button"
+                  onClick={connectMagic}
+                  disabled={connecting || creatingKey || testing}
+                  className="px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-700 disabled:opacity-60 text-white text-sm font-semibold inline-flex items-center gap-2"
+                >
+                  {(connecting || creatingKey || testing) ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  {(connecting || creatingKey || testing) ? 'Conectando…' : 'Conectar'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => copy('Comando MCP Inspector', inspectorCommand)}
+                  className="px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-700 text-white text-sm font-semibold inline-flex items-center gap-2"
+                >
+                  <TerminalSquare className="h-4 w-4" />
+                  Copiar comando do Inspector
+                </button>
+              )}
+
               <button
                 type="button"
-                onClick={() => copy('URL completa', fullEndpoint)}
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
+                onClick={() => copy('URL do MCP', fullEndpoint)}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
               >
                 <Copy className="h-4 w-4" />
-                Copiar URL completa
+                Copiar URL
               </button>
-              <a
-                href={metadataUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
-              >
-                <ExternalLink className="h-4 w-4" />
-                Abrir metadata (JSON)
-              </a>
             </div>
           </div>
 
-          {testResult?.message && (
-            <div className={`mt-3 text-sm ${testResult.ok ? 'text-emerald-700 dark:text-emerald-300' : 'text-rose-700 dark:text-rose-300'}`}>
-              {testResult.message}
+          {testResult?.ok && (
+            <div className="mt-4 rounded-xl border border-emerald-200 dark:border-emerald-500/30 bg-emerald-50 dark:bg-emerald-500/10 p-4">
+              <div className="text-sm font-semibold text-emerald-800 dark:text-emerald-200 inline-flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4" />
+                Conectado
+              </div>
+              <div className="mt-1 text-xs text-emerald-800/80 dark:text-emerald-200/80">
+                Tools disponíveis: <span className="font-semibold">{testResult.toolsCount ?? 0}</span>
+                {typeof testResult.toolsCount === 'number' && testResult.toolsCount > 0 && testResult.toolsPreview?.length ? (
+                  <>
+                    {' '}
+                    · Ex.: <span className="font-mono">{testResult.toolsPreview[0]}</span>
+                  </>
+                ) : null}
+              </div>
+              <div className="mt-3 text-xs font-mono whitespace-pre-wrap rounded-lg border border-emerald-200 dark:border-emerald-500/30 bg-white/70 dark:bg-black/20 p-3 text-slate-800 dark:text-slate-100">
+                {inspectorCommand}
+              </div>
             </div>
           )}
 
-          {testResult?.ok && testResult.toolsPreview?.length ? (
-            <div className="mt-3">
-              <div className="text-xs font-semibold text-slate-700 dark:text-slate-200 mb-1">Exemplo de tools</div>
-              <div className="flex flex-wrap gap-2">
-                {testResult.toolsPreview.map((t) => (
-                  <span
-                    key={t}
-                    className="text-xs font-mono px-2 py-1 rounded-lg border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-black/20 text-slate-800 dark:text-slate-100"
-                  >
-                    {t}
-                  </span>
-                ))}
+          {testResult && !testResult.ok && (
+            <div className="mt-4 rounded-xl border border-rose-200 dark:border-rose-500/30 bg-rose-50 dark:bg-rose-500/10 p-4">
+              <div className="text-sm font-semibold text-rose-800 dark:text-rose-200 inline-flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" />
+                Não foi possível conectar
+              </div>
+              <div className="mt-1 text-xs text-rose-800/80 dark:text-rose-200/80">{testResult.message}</div>
+            </div>
+          )}
+        </div>
+
+        {/* "Tenho uma chave" (progressive disclosure) */}
+        <div className="mt-4 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setShowHaveKey((v) => !v)}
+            className="w-full flex items-center justify-between gap-3 px-4 py-3 text-sm font-semibold text-slate-800 dark:text-slate-100"
+          >
+            <span>Já tenho uma API key</span>
+            <ChevronDown className={`h-4 w-4 text-slate-500 dark:text-slate-400 transition-transform ${showHaveKey ? 'rotate-180' : ''}`} />
+          </button>
+          {showHaveKey && (
+            <div className="px-4 pb-4">
+              <div className="text-xs text-slate-600 dark:text-slate-300 mb-3">
+                Cole a chave (não é salva). Autenticação: <span className="font-mono">Authorization: Bearer {'<API_KEY>'}</span>.
+              </div>
+              <div className="flex flex-wrap gap-2 items-center">
+                <input
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  ref={apiKeyInputRef}
+                  className="min-w-[260px] flex-1 px-3 py-2.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 text-slate-900 dark:text-white font-mono text-xs"
+                  placeholder="Cole aqui sua API key"
+                />
+                <button
+                  type="button"
+                  onClick={testConnection}
+                  disabled={testing}
+                  className="px-3 py-2.5 rounded-lg bg-primary-600 hover:bg-primary-700 disabled:opacity-60 text-white text-sm font-semibold inline-flex items-center gap-2"
+                >
+                  <Play className="h-4 w-4" />
+                  {testing ? 'Testando…' : 'Testar'}
+                </button>
+              </div>
+              <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                Precisa revogar/ver histórico? <button type="button" onClick={navigateToApiKeys} className="underline">Gerenciar API keys</button>
               </div>
             </div>
-          ) : null}
-        </div>
-
-        {/* Conectar (3 passos) */}
-        <div className="mt-4 grid grid-cols-1 gap-4">
-          <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4">
-            <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">
-              Passo 1 — Gere uma API key
-            </div>
-            <div className="text-xs text-slate-600 dark:text-slate-300 mb-3">
-              A chave autentica o MCP e limita o acesso à sua organização.
-            </div>
-            <button
-              type="button"
-              onClick={navigateToApiKeys}
-              className="px-3 py-2 rounded-lg bg-primary-600 hover:bg-primary-700 text-white text-sm font-semibold inline-flex items-center gap-2"
-            >
-              <KeyRound className="h-4 w-4" />
-              Ir para API Keys
-            </button>
-            <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
-              Dica: use o hash <span className="font-mono">#api</span> para abrir direto: <span className="font-mono">/settings/integracoes#api</span>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4">
-            <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">
-              Passo 2 — Cole a API key (fica só em memória)
-            </div>
-            <div className="text-xs text-slate-600 dark:text-slate-300 mb-3">
-              Autenticação: <span className="font-mono">Authorization: Bearer {'<API_KEY>'}</span> (ou <span className="font-mono">X-Api-Key</span>).
-            </div>
-            <div className="flex flex-wrap gap-2 items-center">
-              <input
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                className="min-w-[260px] flex-1 px-3 py-2.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 text-slate-900 dark:text-white font-mono text-xs"
-                placeholder="Cole aqui sua API key (não é salva)"
-              />
-              <button
-                type="button"
-                onClick={() => copy('Header Authorization', `Authorization: Bearer ${apiKey.trim() || '<API_KEY>'}`)}
-                className="px-3 py-2.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
-              >
-                <Copy className="h-4 w-4" />
-                Copiar header
-              </button>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4">
-            <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">
-              Passo 3 — Testar conexão
-            </div>
-            <div className="text-xs text-slate-600 dark:text-slate-300 mb-3">
-              Esse teste chama <span className="font-mono">initialize</span> e <span className="font-mono">tools/list</span>. Se der OK aqui, está pronto para o Inspector e para clientes MCP.
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={testConnection}
-                disabled={testing}
-                className="px-3 py-2 rounded-lg bg-primary-600 hover:bg-primary-700 disabled:opacity-60 text-white text-sm font-semibold inline-flex items-center gap-2"
-              >
-                <Play className="h-4 w-4" />
-                {testing ? 'Testando…' : 'Testar conexão'}
-              </button>
-              <button
-                type="button"
-                onClick={() => copy('Comando MCP Inspector', inspectorCommand)}
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
-              >
-                <TerminalSquare className="h-4 w-4" />
-                Copiar comando Inspector
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Como testar agora */}
-        <div className="mt-4 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-black/30 p-4">
-          <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">Como testar agora (recomendado)</div>
-          <div className="text-xs text-slate-600 dark:text-slate-300 mb-3">
-            Use o MCP Inspector para listar tools e chamar <span className="font-mono">tools/call</span> com segurança.
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => copy('URL do MCP', fullEndpoint)}
-              className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
-            >
-              <Copy className="h-4 w-4" />
-              Copiar URL do MCP
-            </button>
-            <button
-              type="button"
-              onClick={() => copy('Comando', inspectorCommand)}
-              className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
-            >
-              <TerminalSquare className="h-4 w-4" />
-              Copiar comando
-            </button>
-          </div>
-
-          <div className="mt-3 text-xs font-mono whitespace-pre-wrap rounded-lg border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-black/20 p-3 text-slate-800 dark:text-slate-100">
-            {inspectorCommand}
-          </div>
+          )}
         </div>
 
         {/* Detalhes técnicos (colapsável) */}
@@ -366,7 +368,7 @@ export const McpSection: React.FC = () => {
           >
             <span className="inline-flex items-center gap-2">
               <TerminalSquare className="h-4 w-4" />
-              Detalhes técnicos (curl / métodos MCP)
+              Avançado
             </span>
             <span className="text-slate-500 dark:text-slate-400">{showAdvanced ? 'Ocultar' : 'Mostrar'}</span>
           </button>
@@ -374,7 +376,7 @@ export const McpSection: React.FC = () => {
           {showAdvanced && (
             <div className="px-4 pb-4">
               <div className="text-xs text-slate-600 dark:text-slate-300 mb-3">
-                O endpoint MCP aceita JSON-RPC 2.0 em <span className="font-mono">POST {endpointPath}</span>. Métodos principais: <span className="font-mono">initialize</span>, <span className="font-mono">tools/list</span>, <span className="font-mono">tools/call</span>.
+                Para clientes MCP customizados e diagnóstico.
               </div>
 
               <div className="flex flex-wrap gap-2 mb-3">
@@ -393,6 +395,14 @@ export const McpSection: React.FC = () => {
                 >
                   <TerminalSquare className="h-4 w-4" />
                   Copiar tools/list
+                </button>
+                <button
+                  type="button"
+                  onClick={copyMetadata}
+                  className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
+                >
+                  <Copy className="h-4 w-4" />
+                  Copiar metadata
                 </button>
               </div>
 
@@ -418,6 +428,35 @@ export const McpSection: React.FC = () => {
                 </div>
                 <div className="text-xs text-amber-800/80 dark:text-amber-200/80">
                   Para conectar no ChatGPT, o MCP autenticado precisa de OAuth 2.1/PKCE. Esta tela cobre a Fase 1 (API key) para Inspector e clientes MCP controlados por você.
+                </div>
+              </div>
+
+              <div className="mt-3 rounded-lg border border-slate-200 dark:border-white/10 bg-white/60 dark:bg-black/20 p-3">
+                <div className="text-xs font-semibold text-slate-700 dark:text-slate-200 mb-2 inline-flex items-center gap-2">
+                  <ExternalLink className="h-4 w-4" />
+                  Metadata (debug)
+                </div>
+                <div className="text-xs text-slate-600 dark:text-slate-300 mb-3">
+                  Esse JSON existe para diagnóstico/healthcheck. No dia a dia, você normalmente só precisa da URL do MCP e da API key.
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={copyMetadata}
+                    className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
+                  >
+                    <Copy className="h-4 w-4" />
+                    Copiar metadata
+                  </button>
+                  <a
+                    href={metadataUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-800 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    Abrir metadata
+                  </a>
                 </div>
               </div>
             </div>

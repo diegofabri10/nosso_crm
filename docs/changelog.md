@@ -2,6 +2,12 @@
 
 ## 27/12/2025
 
+- **Integrações → MCP (produto)**:
+  - Reformulada a seção de MCP para ser “produto”: wizard em 3 passos (gerar key → colar → testar), status “Conectado”, botões de copiar (URL completa / comando do MCP Inspector / cURLs) e mensagem clara sobre **ChatGPT exigir OAuth (Fase 2)**.
+  - Detalhe técnico: o teste da UI chama `initialize` + `tools/list` no endpoint `/api/mcp` usando `Authorization: Bearer` (e fallback `X-Api-Key`) e reporta quantidade/preview de tools.
+  - UX: agora o Passo 1 pode **gerar a API key direto na tela** (RPC `create_api_key`) e já preenche o Passo 2 automaticamente; “metadata (JSON)” virou **Copiar** (e “Abrir” ficou em seção avançada).
+  - UX (Jobs cut): a tela agora tem **um único CTA principal (“Conectar”)** que faz tudo (gera key + testa) e, ao finalizar, mostra “Pronto” com o próximo passo (copiar comando do Inspector). Conteúdo técnico ficou em **Avançado**.
+
 - **MCP (foundation)**:
   - Criado o catálogo canônico de tools do CRM para MCP (nomes padrão `crm.*`, títulos e descrições) em `lib/mcp/crmToolCatalog.ts`.
   - Criado um registry/adaptador para expor as tools existentes de `createCRMTools` como tools MCP (mapeamento interno → nome MCP, com fallback para tools não mapeadas) em `lib/mcp/crmRegistry.ts`.
@@ -25,6 +31,7 @@
   - Root redirect: a rota `/` agora aplica um **gate inteligente**:
     - se `INSTALLER_ENABLED !== 'false'` e a instância **não estiver inicializada** (ou não der pra checar), redireciona para **`/install`**;
     - se a instância já estiver inicializada, segue para **`/dashboard`** (não força `/install`).
+  - Vercel env targets: a seleção “Production/Preview” foi removida da UI; o instalador aplica envs automaticamente em **Production + Preview** (zero fricção).
   - Supabase:
     - Wizard permite **listar projetos via PAT** e selecionar (preenche `projectRef`/`supabaseUrl`).
     - Wizard permite **criar projeto via PAT** (listar orgs → criar projeto com `db_pass` + região smart group) e já auto-preencher o resto.
@@ -36,7 +43,7 @@
     - O step `supabase_edge_functions` agora **auto-skip** quando não existem functions no repo (não exige PAT só por isso).
   - UX (Supabase):
     - Ao colar o **PAT**, o Wizard agora **lista projetos automaticamente** (com debounce) e, se não encontrar nenhum, sugere **criar um projeto automaticamente** (já seguindo com auto-preenchimento).
-    - Refatorado para **Jobs-style / progressive disclosure**: primeiro pede só o **PAT**, depois o usuário escolhe/cria o projeto, e só então aparecem toggles/detalhes (campos avançados ficam escondidos).
+    - Refatorado para **progressive disclosure**: primeiro pede só o **PAT**, depois o usuário escolhe/cria o projeto (com seleção de **organização** quando houver múltiplas), e só então aparecem toggles/detalhes (campos avançados ficam escondidos).
     - Copy: esclarecido que o token necessário é o **Access Token (PAT)** (prefixo `sbp_`) e **não** o token da “Experimental API”.
 
 - **Build (fix)**:
@@ -208,7 +215,7 @@
   - UX (Boards): modal **Criar Novo Board** agora é **responsivo em telas menores** (mobile quase full-screen com scroll interno; modo chat vira coluna no mobile e só divide em 2 colunas no desktop).
   - UX (Boards): refinado sizing do modal do Wizard para não “inflar” em telas maiores (mobile `h-full`, desktop `h-auto` + `max-w` menor).
   - UX (Boards): modal do Wizard agora tem **hard cap por viewport** (`max-w: calc(100vw - padding)` / `max-h: calc(100dvh - padding)`) para evitar overflow em telas pequenas.
-  - UX (Boards): Wizard “Criar Novo Board” ganhou tela inicial **Jobs-style** (3 escolhas grandes: do zero / playbook recomendado / template individual) e só depois mostra as listas, reduzindo fricção e “poluição” visual.
+  - UX (Boards): Wizard “Criar Novo Board” ganhou tela inicial em **progressive disclosure** (3 escolhas grandes: do zero / playbook recomendado / template individual) e só depois mostra as listas, reduzindo fricção e “poluição” visual.
   - UX (Boards): tela inicial do Wizard foi **compactada** (formato “chooser”) e agora dá **destaque ao Criar com IA** como CTA primário.
   - UX (Modais): criado um conjunto de **tokens de modal** (`components/ui/modalStyles.ts`) e o `components/ui/Modal.tsx` passou a usá-los; modais de Boards foram alinhados para manter consistência (overlay, padding, radius, viewport cap e foco).
   - UX (Boards): Wizard “Criar Novo Board” agora mantém o **modo browse compacto** (mesma filosofia da home) e removeu o **footer vazio** no step de seleção para evitar “espaço morto” e sensação de modal gigante.

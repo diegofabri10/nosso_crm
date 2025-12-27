@@ -108,8 +108,17 @@ const IntegrationsSettings: React.FC = () => {
   const [subTab, setSubTab] = useState<IntegrationsSubTab>('api');
 
   useEffect(() => {
-    const h = typeof window !== 'undefined' ? (window.location.hash || '').replace('#', '') : '';
-    if (h === 'webhooks' || h === 'api' || h === 'mcp') setSubTab(h as IntegrationsSubTab);
+    const syncFromHash = () => {
+      const h = typeof window !== 'undefined' ? (window.location.hash || '').replace('#', '') : '';
+      if (h === 'webhooks' || h === 'api' || h === 'mcp') setSubTab(h as IntegrationsSubTab);
+    };
+
+    syncFromHash();
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('hashchange', syncFromHash);
+      return () => window.removeEventListener('hashchange', syncFromHash);
+    }
   }, []);
 
   const setSubTabAndHash = (t: IntegrationsSubTab) => {

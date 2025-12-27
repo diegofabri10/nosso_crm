@@ -101,12 +101,14 @@ type SupabaseProjectListItem = {
   region?: string;
   created_at?: string;
   status?: string;
+  organization_slug?: string;
+  organizationSlug?: string;
 };
 
 type SupabaseOrgListItem = { id?: string; slug?: string; name?: string };
 
 export async function listSupabaseProjects(params: { accessToken: string }): Promise<
-  | { ok: true; projects: Array<{ ref: string; name: string; region?: string; status?: string }>; response: unknown }
+  | { ok: true; projects: Array<{ ref: string; name: string; region?: string; status?: string; organizationSlug?: string }>; response: unknown }
   | { ok: false; error: string; status?: number; response?: unknown }
 > {
   const res = await supabaseManagementFetch('/v1/projects', params.accessToken, { method: 'GET' });
@@ -119,6 +121,12 @@ export async function listSupabaseProjects(params: { accessToken: string }): Pro
       name: typeof p.name === 'string' ? p.name : '',
       region: typeof p.region === 'string' ? p.region : undefined,
       status: typeof p.status === 'string' ? p.status : undefined,
+      organizationSlug:
+        typeof p.organization_slug === 'string'
+          ? p.organization_slug
+          : typeof p.organizationSlug === 'string'
+            ? p.organizationSlug
+            : undefined,
     }))
     .filter((p) => p.ref && p.name);
 

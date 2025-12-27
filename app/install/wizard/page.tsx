@@ -22,6 +22,7 @@ type SupabaseProjectOption = {
   region?: string;
   status?: string;
   supabaseUrl: string;
+  organizationSlug?: string;
 };
 
 type SupabaseOrgOption = { slug: string; name: string; id?: string };
@@ -119,6 +120,7 @@ export default function InstallWizardPage() {
   const [supabaseOrgsError, setSupabaseOrgsError] = useState<string | null>(null);
   const [supabaseOrgs, setSupabaseOrgs] = useState<SupabaseOrgOption[]>([]);
   const [supabaseCreateOrgSlug, setSupabaseCreateOrgSlug] = useState('');
+  const [supabaseSelectedOrgSlug, setSupabaseSelectedOrgSlug] = useState('');
   const [supabaseCreateName, setSupabaseCreateName] = useState('');
   const [supabaseCreateDbPass, setSupabaseCreateDbPass] = useState('');
   const [supabaseCreateRegion, setSupabaseCreateRegion] = useState<'americas' | 'emea' | 'apac'>('americas');
@@ -136,7 +138,9 @@ export default function InstallWizardPage() {
   const [adminPassword, setAdminPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
-  const [targets, setTargets] = useState({ production: true, preview: true });
+  // “Padrão ouro”: aplicar envs tanto em Production quanto em Preview.
+  // O usuário não precisa escolher isso (evita erro humano).
+  const selectedTargets = useMemo(() => ['production', 'preview'] as const, []);
   const [currentStep, setCurrentStep] = useState(0);
 
   const [installing, setInstalling] = useState(false);
@@ -215,12 +219,6 @@ export default function InstallWizardPage() {
 
     return () => clearTimeout(handle);
   }, [supabaseUrl, supabaseAccessToken, supabaseResolving, supabaseResolvedOk]);
-
-  const selectedTargets = useMemo(() => {
-    return (Object.entries(targets).filter(([, v]) => v).map(([k]) => k) as Array<
-      'production' | 'preview'
-    >);
-  }, [targets]);
 
   const passwordValid = adminPassword.length >= 6;
   const passwordsMatch =
@@ -432,6 +430,12 @@ export default function InstallWizardPage() {
     }
   };
 
+  const orgNameBySlug = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const o of supabaseOrgs) map.set(o.slug, o.name);
+    return map;
+  }, [supabaseOrgs]);
+
   useEffect(() => {
     // “100% mágico”: ao colar o PAT, lista projetos automaticamente (com debounce) e evita spam.
     if (supabaseMode !== 'existing') return;
@@ -455,8 +459,20 @@ export default function InstallWizardPage() {
   ]);
 
   useEffect(() => {
+    // Se temos orgs carregadas e ainda não escolhemos uma, aplica um default (primeira org).
+    // Isso mantém o fluxo zero fricção para quem só tem 1 org, mas permite escolha quando há várias.
+    if (supabaseOrgs.length === 0) return;
+    if (supabaseSelectedOrgSlug) return;
+    const first = supabaseOrgs[0]?.slug;
+    if (!first) return;
+    setSupabaseSelectedOrgSlug(first);
+    setSupabaseCreateOrgSlug(first);
+  }, [supabaseOrgs, supabaseSelectedOrgSlug]);
+
+  useEffect(() => {
     // Se o aluno trocar o PAT, limpamos a seleção (evita selecionar projeto “de outro token”).
     setSupabaseSelectedProjectRef('');
+    setSupabaseSelectedOrgSlug('');
     setSupabaseProjectsLoadedForPat('');
     setSupabaseProjects([]);
     setSupabaseProjectsError(null);
@@ -666,36 +682,6 @@ export default function InstallWizardPage() {
                       Trocar token/projeto
                     </button>
                   </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm text-slate-600 dark:text-slate-300">
-                      Envs alvo
-                    </label>
-                    <div className="flex items-center gap-3 text-sm text-slate-600 dark:text-slate-300">
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={targets.production}
-                          onChange={(e) =>
-                            setTargets((prev) => ({ ...prev, production: e.target.checked }))
-                          }
-                          className="accent-primary-600"
-                        />
-                        Production
-                      </label>
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={targets.preview}
-                          onChange={(e) =>
-                            setTargets((prev) => ({ ...prev, preview: e.target.checked }))
-                          }
-                          className="accent-primary-600"
-                        />
-                        Preview
-                      </label>
-                    </div>
-                  </div>
                 </div>
               ) : null}
 
@@ -703,11 +689,11 @@ export default function InstallWizardPage() {
                 <div className="border-t border-slate-200 dark:border-white/10 pt-5 space-y-4">
                   <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 bg-slate-50 dark:bg-slate-900/50 space-y-3">
                     <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
-                      Supabase (do jeito Jobs): 1 coisa por vez
+                      Supabase: configuração guiada
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      Primeiro você cola o <b>PAT</b>. Depois você escolhe/cria o projeto. Aí a gente
-                      resolve o resto (keys + dbUrl) sozinho.
+                      1) cole o <b>PAT</b> • 2) escolha/crie o projeto • 3) o sistema resolve o resto
+                      (keys + dbUrl) automaticamente.
                     </p>
                   </div>
 
@@ -750,7 +736,11 @@ export default function InstallWizardPage() {
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => setSupabaseUiStep('project')}
+                        onClick={async () => {
+                          setSupabaseUiStep('project');
+                          // Load orgs early so we can ask org-first when needed.
+                          await loadSupabaseOrgs();
+                        }}
                         disabled={!supabaseAccessToken.trim()}
                         className="px-3 py-2 rounded-lg text-sm font-semibold bg-primary-600 text-white hover:bg-primary-500 disabled:opacity-50"
                       >
@@ -816,9 +806,37 @@ export default function InstallWizardPage() {
                       </div>
 
                       <p className="text-xs text-slate-500 dark:text-slate-400">
-                        Observação: contas free podem ter limite de projetos. Se o Supabase bloquear,
+                        Observação: limites variam por plano/organização. Se o Supabase bloquear,
                         vamos mostrar o erro real aqui.
                       </p>
+
+                      {supabaseOrgs.length > 1 ? (
+                        <div className="space-y-2">
+                          <label className="text-sm text-slate-600 dark:text-slate-300">
+                            Organização
+                          </label>
+                          <select
+                            value={supabaseSelectedOrgSlug}
+                            onChange={(e) => {
+                              const slug = e.target.value;
+                              setSupabaseSelectedOrgSlug(slug);
+                              setSupabaseCreateOrgSlug(slug);
+                              setSupabaseSelectedProjectRef('');
+                            }}
+                            className="w-full bg-white dark:bg-slate-900/50 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500"
+                          >
+                            <option value="">Selecione…</option>
+                            {supabaseOrgs.map((o) => (
+                              <option key={o.slug} value={o.slug}>
+                                {o.name} — {o.slug}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Você tem múltiplas orgs. Escolha a org certa para listar/criar projetos.
+                          </p>
+                        </div>
+                      ) : null}
 
                       {supabaseMode === 'existing' ? (
                         <div className="space-y-3">
@@ -874,7 +892,8 @@ export default function InstallWizardPage() {
                                 onChange={(e) => {
                                   const ref = e.target.value;
                                   setSupabaseSelectedProjectRef(ref);
-                                  const selected = supabaseProjects.find((p) => p.ref === ref) || null;
+                                  const selected =
+                                    supabaseProjects.find((p) => p.ref === ref) || null;
                                   if (selected) {
                                     setSupabaseUrl(selected.supabaseUrl);
                                     setSupabaseProjectRefTouched(true);
@@ -886,11 +905,21 @@ export default function InstallWizardPage() {
                                 className="w-full bg-white dark:bg-slate-900/50 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500"
                               >
                                 <option value="">Selecione…</option>
-                                {supabaseProjects.map((p) => (
-                                  <option key={p.ref} value={p.ref}>
-                                    {p.name} — {p.ref}{p.status ? ` (${p.status})` : ''}
-                                  </option>
-                                ))}
+                                {supabaseProjects
+                                  .filter((p) =>
+                                    !supabaseSelectedOrgSlug
+                                      ? true
+                                      : (p.organizationSlug || '') === supabaseSelectedOrgSlug
+                                  )
+                                  .map((p) => (
+                                    <option key={p.ref} value={p.ref}>
+                                      {p.name} — {p.ref}
+                                      {p.status ? ` (${p.status})` : ''}
+                                      {p.organizationSlug
+                                        ? ` · ${orgNameBySlug.get(p.organizationSlug) || p.organizationSlug}`
+                                        : ''}
+                                    </option>
+                                  ))}
                               </select>
                             </div>
                           ) : null}
