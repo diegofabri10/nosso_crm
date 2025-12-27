@@ -9,6 +9,13 @@
   - Detalhe técnico: `boardsService` agora **omite** `default_product_id` quando não há produto e faz **retry** removendo o campo ao detectar o erro “schema cache”.
 - **Settings (UI)**:
   - `SettingsSection` foi padronizado para o layout de card `rounded-2xl` com header mais clean, alinhando com o padrão visual recente das telas de Configurações.
+  - Abas/rotas:
+    - Nova aba **Produtos/Serviços** (admin) e rota `/settings/products` (catálogo não fica mais em “Geral”).
+    - Nova rota `/settings/integracoes` abrindo a aba “Integrações”.
+  - **Central de I.A**:
+    - “Funções de IA” voltou para o padrão visual de “row-card” com ações por ícone (editar prompt + toggle por ícone).
+    - Toggle por ícone padronizado: **ativo verde** / **desativado vermelho**.
+  - **Integrações → Webhooks**: corrigido exemplo de `curl` (remoção de caracteres `+` no output).
 - **Debug Mode (UX)**:
   - Debug agora é **reativo** (sem refresh): toggle dispara evento (`DEBUG_MODE_EVENT`) e `DebugFillButton` usa `useDebugMode`.
   - Fix: geração de telefone fake agora é determinística (sem `fromRegExp`, evitando `\\` no número).
