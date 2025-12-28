@@ -212,6 +212,8 @@ export default function InstallWizardPage() {
   const [supabaseCreateError, setSupabaseCreateError] = useState<string | null>(null);
   const [supabaseProvisioning, setSupabaseProvisioning] = useState(false);
   const [supabaseProvisioningStatus, setSupabaseProvisioningStatus] = useState<string | null>(null);
+  const supabaseProvisioningTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const supabaseProvisioningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [edgeFunctionsPreview, setEdgeFunctionsPreview] = useState<
     Array<{ slug: string; verify_jwt: boolean }>
@@ -1218,36 +1220,75 @@ export default function InstallWizardPage() {
         );
       }
 
-      // Wait for Supabase to finish provisioning the project before resolving/migrating.
-      if (ref) {
-        setSupabaseProvisioning(true);
-        setSupabaseProvisioningStatus('coming_up');
-        const t0 = Date.now();
-        const timeoutMs = 210_000;
-        while (Date.now() - t0 < timeoutMs) {
-          const st = await fetch('/api/installer/supabase/project-status', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-              installerToken: installerToken.trim() || undefined,
-              accessToken: supabaseAccessToken.trim(),
-              projectRef: ref,
-            }),
-          });
-          const stData = await st.json().catch(() => null);
-          const rawStatus = typeof stData?.status === 'string' ? stData.status : '';
-          const normalized = String(rawStatus || '').toUpperCase();
-          setSupabaseProvisioningStatus(rawStatus || 'coming_up');
-          if (normalized.startsWith('ACTIVE')) break;
-          await new Promise((r) => setTimeout(r, 4000));
-        }
-        setSupabaseProvisioning(false);
-      }
-
-      // Immediately resolve keys/db.
-      await resolveSupabase('manual');
+      // Switch immediately to the cinematic "final" screen, then keep monitoring provisioning in the background.
       setSupabaseMode('existing');
       setSupabaseUiStep('final');
+
+      if (ref) {
+        // Clear any previous timers
+        if (supabaseProvisioningTimerRef.current) {
+          clearInterval(supabaseProvisioningTimerRef.current);
+          supabaseProvisioningTimerRef.current = null;
+        }
+        if (supabaseProvisioningTimeoutRef.current) {
+          clearTimeout(supabaseProvisioningTimeoutRef.current);
+          supabaseProvisioningTimeoutRef.current = null;
+        }
+
+        setSupabaseProvisioning(true);
+        setSupabaseProvisioningStatus('COMING_UP');
+
+        const poll = async () => {
+          try {
+            const st = await fetch('/api/installer/supabase/project-status', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                installerToken: installerToken.trim() || undefined,
+                accessToken: supabaseAccessToken.trim(),
+                projectRef: ref,
+              }),
+            });
+            const stData = await st.json().catch(() => null);
+            const rawStatus = typeof stData?.status === 'string' ? stData.status : '';
+            const normalized = String(rawStatus || '').toUpperCase();
+            if (rawStatus) setSupabaseProvisioningStatus(rawStatus);
+
+            if (normalized.startsWith('ACTIVE')) {
+              setSupabaseProvisioning(false);
+              if (supabaseProvisioningTimerRef.current) {
+                clearInterval(supabaseProvisioningTimerRef.current);
+                supabaseProvisioningTimerRef.current = null;
+              }
+              if (supabaseProvisioningTimeoutRef.current) {
+                clearTimeout(supabaseProvisioningTimeoutRef.current);
+                supabaseProvisioningTimeoutRef.current = null;
+              }
+              // Now that provisioning is done, resolve keys/db.
+              void resolveSupabase('auto');
+            }
+          } catch {
+            // ignore transient errors while provisioning
+          }
+        };
+
+        void poll();
+        supabaseProvisioningTimerRef.current = setInterval(poll, 4000);
+        supabaseProvisioningTimeoutRef.current = setTimeout(() => {
+          setSupabaseProvisioning(false);
+          setSupabaseResolveError(
+            'Projeto ainda está “subindo”. Aguarde 1–3 minutos e tente novamente.'
+          );
+          setSupabaseAdvanced(true);
+          if (supabaseProvisioningTimerRef.current) {
+            clearInterval(supabaseProvisioningTimerRef.current);
+            supabaseProvisioningTimerRef.current = null;
+          }
+        }, 210_000);
+      }
+
+      // Also attempt resolving right away (keys usually work even while DB/Storage still warms up).
+      void resolveSupabase('auto');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Falha ao criar projeto';
       setSupabaseCreateError(humanizeSupabaseCreateError(message));

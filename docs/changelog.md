@@ -57,6 +57,7 @@
       - Backend: o `POST /api/installer/run` executa um step `supabase_project_ready` com timeout e mensagem clara.
     - Fix (Storage): **não pulamos Storage**. Em vez disso, o passo de migrations agora **espera o Storage ficar disponível** (`storage.buckets` existir) antes de executar o SQL, evitando o erro `relation "storage.buckets" does not exist`.
     - UX (cinematográfico — espera com emoção): durante provisioning/espera, o wizard e o overlay “Piloto automático” agora exibem **telemetria viva** (polling do status do projeto) + animações “warp/scanlines” e microcopy estilo missão espacial; ao concluir com sucesso, há um **crescendo visual** (“aplausos” sutil).
+    - UX (criar projeto): após o `create-project` retornar, o wizard **não fica travado** no botão “Criando…”. Ele avança imediatamente para a tela cinematográfica de espera (“Project is coming up”) e continua monitorando o status em background até ficar `ACTIVE`.
     - Fix (Supabase migrations SSL): normalizado `dbUrl` removendo `sslmode` da query string e forçando conexão TLS “no-verify” via `pg` no step de migrations para evitar falhas `self-signed certificate in certificate chain` em redes com proxy/CA corporativa.
     - Preview de Edge Functions em `GET /api/installer/supabase/functions` (lista slugs + `verify_jwt` inferido).
   - Edge Functions:
