@@ -2,6 +2,35 @@
 
 ## 28/12/2025
 
+- **Installer Wizard — Fluxo 100% Automático (Zero Decisões)**:
+  - **Decisão automática de projeto Supabase**: após colar o PAT, o wizard automaticamente:
+    1. Busca todas as organizações do usuário
+    2. Prioriza org paga (se existir) → cria projeto direto
+    3. Se não, busca org Free com slot livre → cria projeto direto
+    4. Se todas as orgs Free estiverem cheias → mostra tela "Precisamos de espaço"
+  - **Tela "Precisamos de espaço"**: lista todos os projetos ativos das orgs Free com botão "Pausar" em cada um. Após pausar, cria projeto automaticamente.
+  - **Sem lista de projetos**: o usuário nunca vê lista de projetos para "escolher". Ele só vê:
+    - Tela de criação (animação cinematográfica)
+    - OU tela de "precisamos de espaço" (só quando necessário)
+  - **Nome auto-sugerido**: `nossocrm`, `nossocrm-2`, `nossocrm-3`, etc.
+  - **Senha auto-gerada**: banco de dados já vem com senha forte gerada automaticamente.
+  - **Região Americas por padrão**: sem input de região.
+  - **Polling de provisioning**: aguarda projeto ficar ACTIVE antes de avançar.
+
+- **Installer Wizard — Reescrita completa (Apple-like UX)**:
+  - **Zero ruído**: cada tela mostra apenas o essencial para aquela etapa. Sem repetição de informações de passos anteriores.
+  - **Auto-avanço**: quando o projeto Vercel é detectado, avança automaticamente. Quando o PAT do Supabase é válido e orgs carregam, avança automaticamente.
+  - **Supabase simplificado**:
+    - Tela PAT: apenas input + link para gerar token. Nada mais.
+    - Tela Projeto: lista projetos existentes OU cria novo. Região oculta (Americas por padrão). Senha do banco auto-gerada.
+    - Nome do projeto: auto-sugere `nossocrm`, `nossocrm-2`, etc. se já existir.
+    - Tela de criação: experiência cinematográfica com animação de loading enquanto provisiona.
+  - **Admin**: apenas 4 campos (empresa, email, senha, confirmar). Erro de senha só aparece após preencher confirmação.
+  - **Lançamento**: tela final com único botão "🚀 Lançar" — sem detalhes técnicos visíveis.
+  - **Overlay de instalação**: experiência cinematográfica full-screen com animações de partículas, mensagens dinâmicas e celebração visual no sucesso.
+  - **Progress dots**: indicador minimalista de 4 pontos no topo (estilo Apple setup).
+  - **Navegação**: apenas "Voltar" quando necessário, sem botões redundantes.
+
 - **Mobile shell (tablet/mobile) — groundwork**:
   - Adicionados utilitários de breakpoint para modo responsivo (`mobile|tablet|desktop`) em `lib/utils/responsive.ts` e hook `hooks/useResponsiveMode.ts`.
   - Criada a base de **Sheets** para fluxos mobile-first: `components/ui/Sheet.tsx` e `components/ui/FullscreenSheet.tsx` (com focus trap + ESC + safe-area bottom).
