@@ -156,6 +156,22 @@ export default function InstallWizardPage() {
   const [supabaseProjects, setSupabaseProjects] = useState<SupabaseProjectOption[]>([]);
   const [supabaseSelectedProjectRef, setSupabaseSelectedProjectRef] = useState('');
   const [supabaseProjectsLoadedForPat, setSupabaseProjectsLoadedForPat] = useState<string>('');
+  const [supabaseGlobalProjectsLoading, setSupabaseGlobalProjectsLoading] = useState(false);
+  const [supabaseGlobalProjectsError, setSupabaseGlobalProjectsError] = useState<string | null>(null);
+  const [supabasePreflightLoading, setSupabasePreflightLoading] = useState(false);
+  const [supabasePreflightError, setSupabasePreflightError] = useState<string | null>(null);
+  const [supabasePreflight, setSupabasePreflight] = useState<{
+    freeGlobalActiveCount: number;
+    freeGlobalLimitHit: boolean;
+    suggestedOrganizationSlug: string | null;
+    organizations: Array<{
+      slug: string;
+      name: string;
+      plan?: string;
+      activeCount: number;
+      activeProjects: Array<SupabaseProjectOption>;
+    }>;
+  } | null>(null);
 
   const [supabaseOrgsLoading, setSupabaseOrgsLoading] = useState(false);
   const [supabaseOrgsError, setSupabaseOrgsError] = useState<string | null>(null);
@@ -569,6 +585,51 @@ export default function InstallWizardPage() {
     }
   };
 
+  const loadSupabaseGlobalProjectsForPreflight = async () => {
+    if (supabaseGlobalProjectsLoading) return;
+    setSupabaseGlobalProjectsError(null);
+    setSupabaseGlobalProjectsLoading(true);
+    try {
+      await loadSupabaseProjects();
+      setSupabaseGlobalProjectsError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Falha ao listar projetos (preflight)';
+      setSupabaseGlobalProjectsError(message);
+    } finally {
+      setSupabaseGlobalProjectsLoading(false);
+    }
+  };
+
+  const loadSupabasePreflight = async () => {
+    if (supabasePreflightLoading) return;
+    setSupabasePreflightError(null);
+    setSupabasePreflightLoading(true);
+    try {
+      const res = await fetch('/api/installer/supabase/preflight', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          installerToken: installerToken.trim() || undefined,
+          accessToken: supabaseAccessToken.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Falha no preflight (HTTP ${res.status})`);
+      setSupabasePreflight({
+        freeGlobalActiveCount: Number(data?.freeGlobalActiveCount || 0),
+        freeGlobalLimitHit: Boolean(data?.freeGlobalLimitHit),
+        suggestedOrganizationSlug:
+          typeof data?.suggestedOrganizationSlug === 'string' ? data.suggestedOrganizationSlug : null,
+        organizations: Array.isArray(data?.organizations) ? (data.organizations as any) : [],
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Falha no preflight';
+      setSupabasePreflightError(message);
+    } finally {
+      setSupabasePreflightLoading(false);
+    }
+  };
+
   const loadSupabaseOrganizationProjects = async (organizationSlug: string, statuses?: string[]) => {
     if (supabaseOrgProjectsLoading) return;
     setSupabaseOrgProjectsError(null);
@@ -621,6 +682,8 @@ export default function InstallWizardPage() {
       if (supabaseSelectedOrgSlug) {
         await loadSupabaseOrganizationProjects(supabaseSelectedOrgSlug, undefined);
       }
+      // Atualiza contagem global (limite Free pode ser global por conta)
+      void loadSupabaseGlobalProjectsForPreflight();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Falha ao pausar projeto';
       setSupabaseOrgProjectsError(message);
@@ -695,6 +758,20 @@ export default function InstallWizardPage() {
 
   const supabaseOrgIsFreePlan = (supabaseSelectedOrgPlan || '').toLowerCase() === 'free';
   const supabaseOrgHasFreeSlot = !supabaseOrgIsFreePlan || supabaseActiveCount < 2;
+
+  const supabaseGlobalFreeLimitHit = Boolean(supabasePreflight?.freeGlobalLimitHit);
+  const supabaseGlobalActiveFreeCount = Number(supabasePreflight?.freeGlobalActiveCount || 0);
+  const supabaseGlobalActiveFreeProjects = useMemo(() => {
+    const orgs = supabasePreflight?.organizations || [];
+    const all: SupabaseProjectOption[] = [];
+    for (const o of orgs) {
+      const plan = String((o as any)?.plan || '').toLowerCase();
+      if (plan !== 'free') continue;
+      const active = Array.isArray((o as any)?.activeProjects) ? (o as any).activeProjects : [];
+      for (const p of active) all.push(p as SupabaseProjectOption);
+    }
+    return all;
+  }, [supabasePreflight]);
 
   const supabaseCreateReady = Boolean(
     supabaseAccessToken.trim() &&
@@ -810,6 +887,8 @@ export default function InstallWizardPage() {
     setSupabaseProjectRefTouched(false);
     setSupabaseUiStep('pat');
     setSupabasePatAutoAdvanced(false);
+    setSupabasePreflight(null);
+    setSupabasePreflightError(null);
   }, [supabaseAccessToken]);
 
   useEffect(() => {
@@ -860,6 +939,31 @@ export default function InstallWizardPage() {
   }, [supabaseUiStep, supabasePatAutoAdvanced, supabaseOrgsLoading, supabaseOrgsError, supabaseOrgs.length]);
 
   useEffect(() => {
+    // Preflight Apple-style: com PAT + orgs carregadas, já buscamos a lista global de projetos
+    // para prever o limite do Free e evitar submeter o usuário a um erro inevitável.
+    if (supabaseUiStep === 'pat') return;
+    const pat = supabaseAccessToken.trim();
+    if (!pat) return;
+    if (supabaseOrgs.length === 0) return;
+    if (supabasePreflight) return;
+    void loadSupabasePreflight();
+  }, [supabaseUiStep, supabaseAccessToken, supabaseOrgs.length, supabaseProjectsLoadedForPat]);
+
+  useEffect(() => {
+    // Apple-style: se existir uma org paga (ou única viável), auto-seleciona para criar (sem sobrescrever escolha explícita).
+    if (supabaseUiStep !== 'project') return;
+    if (supabaseMode !== 'create') return;
+    if (supabaseSelectedOrgSlug) return;
+    if (!supabasePreflight?.suggestedOrganizationSlug) return;
+    const slug = supabasePreflight.suggestedOrganizationSlug;
+    setSupabaseSelectedOrgSlug(slug);
+    setSupabaseCreateOrgSlug(slug);
+    setSupabaseOrgProjects([]);
+    setSupabaseOrgProjectsLoadedKey('');
+    void loadSupabaseOrganizationProjects(slug);
+  }, [supabaseUiStep, supabaseMode, supabaseSelectedOrgSlug, supabasePreflight?.suggestedOrganizationSlug]);
+
+  useEffect(() => {
     // Se só existe 1 org, auto-seleciona e já carrega os projetos (zero fricção).
     if (supabaseUiStep !== 'project') return;
     if (supabaseOrgs.length !== 1) return;
@@ -883,6 +987,13 @@ export default function InstallWizardPage() {
       const organizationSlug = (supabaseCreateOrgSlug.trim() || supabaseSelectedOrgSlug.trim()).trim();
       if (!organizationSlug) {
         throw new Error('Selecione uma organização para criar o projeto.');
+      }
+      // Apple-style: se o preflight já sabe que vai falhar no Free, não tentamos criar.
+      const plan = (supabaseSelectedOrgPlan || '').toLowerCase();
+      if (plan === 'free' && supabaseGlobalFreeLimitHit) {
+        throw new Error(
+          'Você já tem 2 projetos ativos no Free. Pause 1 projeto ativo (reversível) ou faça upgrade para criar um novo.'
+        );
       }
       const res = await fetch('/api/installer/supabase/create-project', {
         method: 'POST',
@@ -1419,29 +1530,44 @@ export default function InstallWizardPage() {
 
                           {supabaseOrgProjects.length > 0 ? (
                             <div className="space-y-2">
-                              <label className="text-sm text-slate-600 dark:text-slate-300">
-                                Selecione um projeto
-                              </label>
-                              <select
-                                value={supabaseSelectedProjectRef}
-                                onChange={(e) => {
-                                  const ref = e.target.value;
-                                  selectSupabaseProject(ref);
-                                }}
-                                className="w-full bg-white dark:bg-slate-900/50 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500"
-                              >
-                                <option value="">Selecione…</option>
-                                {supabaseOrgProjects
-                                  .map((p) => (
-                                    <option key={p.ref} value={p.ref}>
-                                      {p.name} — {p.ref}
-                                      {p.status ? ` (${p.status})` : ''}
-                                      {p.organizationSlug
-                                        ? ` · ${orgNameBySlug.get(p.organizationSlug) || p.organizationSlug}`
-                                        : ''}
-                                    </option>
-                                  ))}
-                              </select>
+                              <div className="text-sm font-semibold text-slate-900 dark:text-white">
+                                Projetos nesta org
+                              </div>
+                              <div className="max-h-56 overflow-auto space-y-2 pr-1">
+                                {supabaseOrgProjects.map((p) => (
+                                  <div
+                                    key={p.ref}
+                                    className="flex items-center justify-between gap-2 rounded-md border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-900/30 p-2"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+                                        {p.name}
+                                      </div>
+                                      <div className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
+                                        <span className="font-mono">{p.ref}</span>
+                                        {p.status ? ` · ${p.status}` : ''}
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <a
+                                        href={`https://supabase.com/dashboard/project/${encodeURIComponent(p.ref)}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-xs underline underline-offset-2"
+                                      >
+                                        abrir
+                                      </a>
+                                      <button
+                                        type="button"
+                                        onClick={() => selectSupabaseProject(p.ref)}
+                                        className={`px-2 py-1 rounded-md text-xs font-semibold text-white ${TEAL.solid}`}
+                                      >
+                                        Usar este projeto
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                           ) : null}
                         </div>
@@ -1456,13 +1582,24 @@ export default function InstallWizardPage() {
                           ) : null}
 
                           {/* iPhone-style: se não há slot no Free, vira uma tela única de decisão (sem formulário). */}
-                          {supabaseOrgIsFreePlan && !supabaseOrgHasFreeSlot && supabaseActiveProjects.length > 0 ? (
+                          {supabaseOrgIsFreePlan &&
+                          (!supabaseOrgHasFreeSlot || supabaseGlobalFreeLimitHit) &&
+                          (supabaseGlobalFreeLimitHit ? supabaseGlobalActiveFreeProjects.length > 0 : supabaseActiveProjects.length > 0) ? (
                             <div className="rounded-xl border border-amber-200 dark:border-amber-500/20 bg-amber-50 dark:bg-amber-900/20 p-4 space-y-3">
                               <div className="text-sm font-semibold text-amber-800 dark:text-amber-200">
-                                Sem espaço nesta organização (Free: 2 projetos ativos)
+                                Sem espaço no Free (limite: 2 projetos ativos)
                               </div>
                               <div className="text-xs text-amber-800/80 dark:text-amber-200/80">
-                                Para criar o <b>{supabaseCreateName || 'nossocrm'}</b>, você precisa liberar <b>1 slot</b>.
+                                {supabaseGlobalFreeLimitHit ? (
+                                  <>
+                                    Seu PAT já tem <b>{supabaseGlobalActiveFreeCount}</b> projetos ativos no <b>Free</b> (limite: <b>2</b>). Para criar o{' '}
+                                    <b>{supabaseCreateName || 'nossocrm'}</b>, libere <b>1 slot</b> pausando um projeto ativo.
+                                  </>
+                                ) : (
+                                  <>
+                                    Para criar o <b>{supabaseCreateName || 'nossocrm'}</b>, você precisa liberar <b>1 slot</b> nesta organização.
+                                  </>
+                                )}
                               </div>
 
                               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -1498,7 +1635,7 @@ export default function InstallWizardPage() {
                                     Recomendado: <b>Pausar</b> (reversível). Depois de pausar 1 projeto, vamos criar e continuar automaticamente.
                                   </div>
                                   <div className="max-h-56 overflow-auto space-y-2 pr-1">
-                                    {supabaseActiveProjects.map((p) => (
+                                    {(supabaseGlobalFreeLimitHit ? supabaseGlobalActiveFreeProjects : supabaseActiveProjects).map((p) => (
                                       <div
                                         key={p.ref}
                                         className="flex items-center justify-between gap-2 rounded-md border border-amber-200/60 dark:border-amber-500/20 bg-white/60 dark:bg-slate-900/30 p-2"
@@ -1508,6 +1645,11 @@ export default function InstallWizardPage() {
                                             {p.name}
                                           </div>
                                           <div className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
+                                            {p.organizationSlug ? (
+                                              <>
+                                                {orgNameBySlug.get(p.organizationSlug) || p.organizationSlug} ·{' '}
+                                              </>
+                                            ) : null}
                                             <span className="font-mono">{p.ref}</span>
                                             {p.status ? ` · ${p.status}` : ''}
                                           </div>
@@ -1583,8 +1725,8 @@ export default function InstallWizardPage() {
                             </div>
                           ) : null}
 
-                          {/* Se está sem slot no Free, escondemos o formulário (fica 1 CTA só). */}
-                          {supabaseOrgIsFreePlan && !supabaseOrgHasFreeSlot ? null : (
+                          {/* Se está sem slot no Free (org ou global), escondemos o formulário (fica 1 CTA só). */}
+                          {supabaseOrgIsFreePlan && (!supabaseOrgHasFreeSlot || supabaseGlobalFreeLimitHit) ? null : (
                             <>
                           <div className="space-y-2">
                             <label className="text-sm text-slate-600 dark:text-slate-300">
