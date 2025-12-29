@@ -1,5 +1,17 @@
 # Changelog
 
+## 29/12/2025
+
+- **README — Reescrita completa seguindo padrão SmartZap**:
+  - **Mudança**: README completamente reescrito focando em instalação via Vercel (fork primeiro)
+  - **Fluxo principal**: Fork no GitHub → Deploy na Vercel → Wizard de instalação
+  - **Destaque**: Instalação via Vercel agora é o método principal e mais destacado (antes do wizard)
+  - **Estrutura**: Seguindo padrão do SmartZap com passo a passo claro e visual
+  - **Público-alvo**: Focado em não-desenvolvedores, linguagem simples e acessível
+  - **Conteúdo**: Adicionados exemplos práticos, troubleshooting simplificado, guia completo de instalação
+  - **Seção técnica**: Informações técnicas movidas para seção "Para Desenvolvedores" no final
+  - **Arquivo**: `README.md`
+
 ## 28/12/2025
 
 - **Installer Wizard — Auto-unlock (experiência mágica sem toggle manual)**:
