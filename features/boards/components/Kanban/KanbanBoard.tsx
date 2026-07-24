@@ -3,8 +3,8 @@ import { DealView, BoardStage } from '@/types';
 import { DealCard } from './DealCard';
 import { isDealRotting, getActivityStatus } from '@/features/boards/hooks/useBoardsController';
 import { MoveToStageModal } from '../Modals/MoveToStageModal';
-
-import { useCRM } from '@/context/CRMContext';
+import { SkeletonDealCard } from '@/components/ui/Skeleton';
+import { useLifecycleStages } from '@/lib/query/hooks/useLifecycleStagesQuery';
 
 /**
  * UI: Drop highlight should follow the stage color.
@@ -66,6 +66,8 @@ interface KanbanBoardProps {
   setLastMouseDownDealId: (id: string | null) => void;
   /** Callback to move a deal to a new stage (for keyboard accessibility) */
   onMoveDealToStage?: (dealId: string, newStageId: string) => void;
+  /** Exibe skeleton cards enquanto os dados carregam */
+  isLoading?: boolean;
 }
 /**
  * Componente React `KanbanBoard`.
@@ -112,8 +114,9 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   handleQuickAddActivity,
   setLastMouseDownDealId,
   onMoveDealToStage,
+  isLoading = false,
 }) => {
-  const { lifecycleStages } = useCRM();
+  const { data: lifecycleStages = [] } = useLifecycleStages();
   const [dragOverStage, setDragOverStage] = useState<string | null>(null);
   
   // State for move-to-stage modal (keyboard accessibility alternative to drag-and-drop)
@@ -177,15 +180,15 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   );
 
   // Handler to confirm move to a new stage
-  const handleConfirmMoveToStage = (dealId: string, newStageId: string) => {
+  const handleConfirmMoveToStage = useCallback((dealId: string, newStageId: string) => {
     if (onMoveDealToStage) {
       onMoveDealToStage(dealId, newStageId);
     }
     setMoveToStageModal(null);
-  };
+  }, [onMoveDealToStage]);
 
   return (
-    <div className="flex gap-4 h-full overflow-x-auto pb-2 w-full">
+    <div role="list" aria-label="Colunas do pipeline" className="flex gap-4 h-full overflow-x-auto pb-2 w-full">
       {stages.map(stage => {
         const stageDeals = dealsByStageId.map.get(stage.id) ?? [];
         const stageValue = dealsByStageId.totals.get(stage.id) ?? 0;
@@ -200,6 +203,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
         return (
           <div
             key={stage.id}
+            role="listitem"
+            aria-label={`Coluna ${stage.label}: ${stageDeals.length} negócio${stageDeals.length !== 1 ? 's' : ''}`}
             onDragOver={(e) => {
               handleDragOver(e);
               setDragOverStage(stage.id);
@@ -254,39 +259,61 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
             </div>
 
             <div
+              role="list"
+              aria-label={`Negócios em ${stage.label}`}
               className={`flex-1 p-2 overflow-y-auto space-y-2 bg-slate-100/50 dark:bg-black/20 scrollbar-thin min-h-[100px]`}
             >
-              {stageDeals.length === 0 && !draggingId && (
-                <div className="h-full flex items-center justify-center text-slate-400 dark:text-slate-600 text-sm py-8">
-                  Sem negócios
+              {/* Skeleton: exibido durante carregamento inicial */}
+              {isLoading && (
+                <>
+                  <SkeletonDealCard />
+                  <SkeletonDealCard />
+                </>
+              )}
+
+              {/* Empty column state */}
+              {!isLoading && stageDeals.length === 0 && !isOver && (
+                <div className="flex flex-col items-center justify-center py-8 px-3 select-none">
+                  <div className="w-10 h-10 rounded-xl border-2 border-dashed border-slate-300 dark:border-white/10 flex items-center justify-center mb-2 text-slate-300 dark:text-white/20">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                      <path d="M8 3.5a.5.5 0 0 1 .5.5v3.5H12a.5.5 0 0 1 0 1H8.5V12a.5.5 0 0 1-1 0V8.5H4a.5.5 0 0 1 0-1h3.5V4a.5.5 0 0 1 .5-.5z"/>
+                    </svg>
+                  </div>
+                  <p className="text-xs text-slate-400 dark:text-slate-600 text-center">
+                    Arraste um negócio aqui
+                  </p>
                 </div>
               )}
+
+              {/* Drop target indicator */}
               {isOver && stageDeals.length === 0 && (
-                <div className="h-full flex items-center justify-center text-green-500 dark:text-green-400 text-sm py-8 font-bold animate-pulse pointer-events-none">
+                <div className="h-full flex items-center justify-center text-emerald-500 dark:text-emerald-400 text-sm py-8 font-bold animate-pulse pointer-events-none">
                   ✓ Solte aqui!
                 </div>
               )}
-              {stageDeals.map(deal => (
-                <DealCard
-                  key={deal.id}
-                  deal={deal}
-                  isRotting={
-                    isDealRotting(deal) &&
-                    !deal.isWon &&
-                    !deal.isLost
-                  }
-                  activityStatus={getActivityStatus(deal)}
-                  isDragging={draggingId === deal.id}
-                  onDragStart={handleDragStart}
-                  onSelect={handleSelectDeal}
-                  // Performance: avoid passing openMenuId (string) to all cards.
-                  // Only 1–2 cards will flip `isMenuOpen` when the menu is toggled.
-                  isMenuOpen={openActivityMenuId === deal.id}
-                  setOpenMenuId={setOpenActivityMenuId}
-                  onQuickAddActivity={handleQuickAddActivity}
-                  setLastMouseDownDealId={setLastMouseDownDealId}
-                  onMoveToStage={onMoveDealToStage ? handleOpenMoveToStage : undefined}
-                />
+
+              {!isLoading && stageDeals.map(deal => (
+                <div key={deal.id} role="listitem">
+                  <DealCard
+                    deal={deal}
+                    isRotting={
+                      isDealRotting(deal) &&
+                      !deal.isWon &&
+                      !deal.isLost
+                    }
+                    activityStatus={getActivityStatus(deal)}
+                    isDragging={draggingId === deal.id}
+                    onDragStart={handleDragStart}
+                    onSelect={handleSelectDeal}
+                    // Performance: avoid passing openMenuId (string) to all cards.
+                    // Only 1–2 cards will flip `isMenuOpen` when the menu is toggled.
+                    isMenuOpen={openActivityMenuId === deal.id}
+                    setOpenMenuId={setOpenActivityMenuId}
+                    onQuickAddActivity={handleQuickAddActivity}
+                    setLastMouseDownDealId={setLastMouseDownDealId}
+                    onMoveToStage={onMoveDealToStage ? handleOpenMoveToStage : undefined}
+                  />
+                </div>
               ))}
             </div>
           </div>

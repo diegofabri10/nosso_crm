@@ -1,4 +1,4 @@
-import { generateObject } from 'ai';
+import { generateText, Output } from 'ai';
 import { z } from 'zod';
 import { requireAITaskContext, AITaskHttpError } from '@/lib/ai/tasks/server';
 import { AnalyzeLeadInputSchema, AnalyzeLeadOutputSchema } from '@/lib/ai/tasks/schemas';
@@ -23,7 +23,7 @@ function json(body: unknown, status = 200): Response {
  */
 export async function POST(req: Request) {
   try {
-    const { model, supabase, organizationId } = await requireAITaskContext(req);
+    const { model, supabase, organizationId, modelId } = await requireAITaskContext(req);
     const enabled = await isAIFeatureEnabled(supabase as any, organizationId, 'ai_deal_analyze');
     if (!enabled) {
       return json({ error: { code: 'AI_FEATURE_DISABLED', message: 'Função de IA desativada: Análise de deal.' } }, 403);
@@ -43,14 +43,25 @@ export async function POST(req: Request) {
       probability: deal?.probability || 50,
     });
 
-    const result = await generateObject({
+    const result = await generateText({
       model,
       maxRetries: 3,
-      schema: AnalyzeLeadOutputSchema,
+      output: Output.object({ schema: AnalyzeLeadOutputSchema }),
       prompt,
     });
 
-    return json(result.object);
+    void (supabase as any).from('ai_conversation_log').insert({
+      organization_id: organizationId,
+      ai_response: '',
+      tokens_used: result.usage?.totalTokens ?? 0,
+      model_used: modelId,
+      action_taken: 'analyze_lead',
+      context_snapshot: {},
+    }).then(({ error }: { error: unknown }) => {
+      if (error) console.error('[AI] log failed:', error);
+    });
+
+    return json(result.output);
   } catch (err: unknown) {
     if (err instanceof AITaskHttpError) return err.toResponse();
     if (err instanceof z.ZodError) {

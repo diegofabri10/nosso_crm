@@ -12,8 +12,10 @@
 // POST { action: string, data: object }
 // -> 200 { result?: any, error?: string, consentType?: string, retryAfter?: number }
 
-import { generateObject, generateText } from 'ai';
+import { generateText, Output } from 'ai';
 import { getModel, type AIProvider } from '@/lib/ai/config';
+import { SECURITY_PREAMBLE } from '@/lib/ai/agent/agent.service';
+import { sanitizeIncomingMessage } from '@/lib/ai/agent/input-filter';
 import { z } from 'zod';
 import { createClient } from '@/lib/supabase/server';
 import { isAllowedOrigin } from '@/lib/security/sameOrigin';
@@ -111,6 +113,25 @@ const RewriteMessageDraftSchema = z.object({
     .describe('Mensagem final para enviar no canal escolhido.'),
 });
 
+function logAIAction(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  orgId: string,
+  action: string,
+  modelId: string,
+  result: { usage?: { totalTokens?: number }; text?: string }
+): void {
+  void (supabase as any).from('ai_conversation_log').insert({
+    organization_id: orgId,
+    ai_response: (result.text || '').slice(0, 1000),
+    tokens_used: result.usage?.totalTokens ?? 0,
+    model_used: modelId,
+    action_taken: action,
+    context_snapshot: {},
+  }).then(({ error }: { error: unknown }) => {
+    if (error) console.error('[AI] log failed:', error);
+  });
+}
+
 function safeContextText(v: unknown, maxBytes = 80_000): string {
   if (v == null) return '';
   try {
@@ -173,7 +194,7 @@ export async function POST(req: Request) {
 
   const { data: orgSettings, error: orgError } = await supabase
     .from('organization_settings')
-    .select('ai_enabled, ai_provider, ai_model, ai_google_key, ai_openai_key, ai_anthropic_key')
+    .select('ai_enabled, ai_model, ai_google_key')
     .eq('organization_id', profile.organization_id)
     .single();
 
@@ -212,13 +233,8 @@ export async function POST(req: Request) {
   }
 
   // Frontend expects "AI consent required" as a *payload* error.
-  const provider: AIProvider = (orgSettings?.ai_provider ?? 'google') as AIProvider;
-  const apiKey: string | null =
-    provider === 'google'
-      ? (orgSettings?.ai_google_key ?? null)
-      : provider === 'openai'
-        ? (orgSettings?.ai_openai_key ?? null)
-        : (orgSettings?.ai_anthropic_key ?? null);
+  const provider: AIProvider = 'google';
+  const apiKey: string | null = orgSettings?.ai_google_key ?? null;
 
   if (orgError || !apiKey) {
     return json<AIActionResponse>({ error: 'AI consent required', consentType: 'AI_CONSENT' }, 200);
@@ -238,13 +254,15 @@ export async function POST(req: Request) {
           stageLabel: stageLabel || deal?.status || '',
           probability: deal?.probability || 50,
         });
-        const result = await generateObject({
+        const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
-          schema: AnalyzeLeadSchema,
+          output: Output.object({ schema: AnalyzeLeadSchema }),
           prompt,
         });
-        return json<AIActionResponse>({ result: result.object });
+        logAIAction(supabase, profile.organization_id, 'analyzeLead', modelId, result);
+        return json<AIActionResponse>({ result: result.output });
       }
 
       case 'generateEmailDraft': {
@@ -257,9 +275,11 @@ export async function POST(req: Request) {
         });
         const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
           prompt,
         });
+        logAIAction(supabase, profile.organization_id, 'generateEmailDraft', modelId, result);
         return json<AIActionResponse>({ result: result.text });
       }
 
@@ -273,22 +293,25 @@ export async function POST(req: Request) {
         } = data as any;
 
         const channelLabel = channel === 'EMAIL' ? 'EMAIL' : 'WHATSAPP';
+        const { text: safeMessage } = sanitizeIncomingMessage(String(currentMessage || ''), { org_id: profile.organization_id });
+        const { text: safeSubject } = sanitizeIncomingMessage(String(currentSubject || ''), { org_id: profile.organization_id });
 
         const snapshotText = safeContextText(cockpitSnapshot);
         const nbaText = safeContextText(nextBestAction);
 
-        const result = await generateObject({
+        const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
-          schema: RewriteMessageDraftSchema,
+          output: Output.object({ schema: RewriteMessageDraftSchema }),
           prompt: `Você é um vendedor sênior e copywriter.
 Sua tarefa é REESCREVER (melhorar) uma mensagem para enviar ao cliente.
 
 CANAL: ${channelLabel}
 
 RASCUNHO ATUAL:
-- subject (se houver): ${String(currentSubject ?? '')}
-- message: ${String(currentMessage ?? '')}
+- subject (se houver): ${safeSubject}
+- message: ${safeMessage}
 
 PRÓXIMA AÇÃO (sugestão/NBA):
 ${nbaText || '[não fornecida]'}
@@ -316,24 +339,28 @@ REGRAS:
 Retorne APENAS no formato do schema (subject opcional, message obrigatório).`,
         });
 
-        return json<AIActionResponse>({ result: result.object });
+        logAIAction(supabase, profile.organization_id, 'rewriteMessageDraft', modelId, result);
+        return json<AIActionResponse>({ result: result.output });
       }
 
       case 'generateRescueMessage': {
         const { deal, channel } = data as any;
         const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
           prompt: `Gere uma mensagem de resgate/follow-up para reativar um deal parado.
 DEAL: ${deal?.title} (${deal?.contactName || ''})
 CANAL: ${channel}
 Responda em português do Brasil.`,
         });
+        logAIAction(supabase, profile.organization_id, 'generateRescueMessage', modelId, result);
         return json<AIActionResponse>({ result: result.text });
       }
 
       case 'generateBoardStructure': {
         const { description, lifecycleStages } = data as any;
+        const { text: safeDescription } = sanitizeIncomingMessage(String(description || ''), { org_id: profile.organization_id });
         const lifecycleList =
           Array.isArray(lifecycleStages) && lifecycleStages.length > 0
             ? lifecycleStages.map((s: any) => ({ id: s?.id || '', name: s?.name || String(s) }))
@@ -347,17 +374,19 @@ Responda em português do Brasil.`,
 
         const resolved = await getResolvedPrompt(supabase as any, profile.organization_id as any, 'task_boards_generate_structure');
         const prompt = renderPromptTemplate(resolved?.content || '', {
-          description,
+          description: safeDescription,
           lifecycleJson: JSON.stringify(lifecycleList),
         });
-        const result = await generateObject({
+        const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
-          schema: BoardStructureSchema,
+          output: Output.object({ schema: BoardStructureSchema }),
           prompt,
         });
 
-        return json<AIActionResponse>({ result: result.object });
+        logAIAction(supabase, profile.organization_id, 'generateBoardStructure', modelId, result);
+        return json<AIActionResponse>({ result: result.output });
       }
 
       case 'generateBoardStrategy': {
@@ -366,34 +395,39 @@ Responda em português do Brasil.`,
         const prompt = renderPromptTemplate(resolved?.content || '', {
           boardName: boardData?.boardName || '',
         });
-        const result = await generateObject({
+        const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
-          schema: BoardStrategySchema,
+          output: Output.object({ schema: BoardStrategySchema }),
           prompt,
         });
-        return json<AIActionResponse>({ result: result.object });
+        logAIAction(supabase, profile.organization_id, 'generateBoardStrategy', modelId, result);
+        return json<AIActionResponse>({ result: result.output });
       }
 
       case 'refineBoardWithAI': {
         const { currentBoard, userInstruction, chatHistory } = data as any;
+        const { text: safeInstruction } = sanitizeIncomingMessage(String(userInstruction || ''), { org_id: profile.organization_id });
         const historyContext = chatHistory ? `\nHistórico:\n${JSON.stringify(chatHistory)}` : '';
         const boardContext = currentBoard
           ? `\nBoard atual (JSON):\n${JSON.stringify(currentBoard)}`
           : '';
         const resolved = await getResolvedPrompt(supabase as any, profile.organization_id as any, 'task_boards_refine');
         const prompt = renderPromptTemplate(resolved?.content || '', {
-          userInstruction,
+          userInstruction: safeInstruction,
           boardContext,
           historyContext,
         });
-        const result = await generateObject({
+        const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
-          schema: RefineBoardSchema,
+          output: Output.object({ schema: RefineBoardSchema }),
           prompt,
         });
-        return json<AIActionResponse>({ result: result.object });
+        logAIAction(supabase, profile.organization_id, 'refineBoardWithAI', modelId, result);
+        return json<AIActionResponse>({ result: result.output });
       }
 
       case 'generateObjectionResponse': {
@@ -403,37 +437,44 @@ Responda em português do Brasil.`,
           objection,
           dealTitle: deal?.title || '',
         });
-        const result = await generateObject({
+        const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
-          schema: ObjectionResponseSchema,
+          output: Output.object({ schema: ObjectionResponseSchema }),
           prompt,
         });
-        return json<AIActionResponse>({ result: result.object });
+        logAIAction(supabase, profile.organization_id, 'generateObjectionResponse', modelId, result);
+        return json<AIActionResponse>({ result: result.output });
       }
 
       case 'parseNaturalLanguageAction': {
         const { text } = data as any;
-        const result = await generateObject({
+        const { text: safeText } = sanitizeIncomingMessage(String(text || ''), { org_id: profile.organization_id });
+        const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
-          schema: ParsedActionSchema,
-          prompt: `Parse para CRM Action: "${text}".
-Campos: title, type (CALL/MEETING/EMAIL/TASK), date, contactName, companyName, confidence.`,
+          output: Output.object({ schema: ParsedActionSchema }),
+          prompt: `Parse para CRM Action: "${safeText}".\nCampos: title, type (CALL/MEETING/EMAIL/TASK), date, contactName, companyName, confidence.`,
         });
-        return json<AIActionResponse>({ result: result.object });
+        logAIAction(supabase, profile.organization_id, 'parseNaturalLanguageAction', modelId, result);
+        return json<AIActionResponse>({ result: result.output });
       }
 
       case 'chatWithCRM': {
         const { message, context } = data as any;
+        const { text: safeMsg } = sanitizeIncomingMessage(String(message || ''), { org_id: profile.organization_id });
         const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
           prompt: `Assistente CRM.
 Contexto: ${JSON.stringify(context)}
-Usuário: ${message}
+Usuário: ${safeMsg}
 Responda em português.`,
         });
+        logAIAction(supabase, profile.organization_id, 'chatWithCRM', modelId, result);
         return json<AIActionResponse>({ result: result.text });
       }
 
@@ -441,9 +482,11 @@ Responda em português.`,
         const { contactName, age } = data as any;
         const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
           prompt: `Parabéns para ${contactName} (${age || ''} anos). Curto e profissional.`,
         });
+        logAIAction(supabase, profile.organization_id, 'generateBirthdayMessage', modelId, result);
         return json<AIActionResponse>({ result: result.text });
       }
 
@@ -454,19 +497,24 @@ Responda em português.`,
         });
         const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
           prompt,
         });
+        logAIAction(supabase, profile.organization_id, 'generateDailyBriefing', modelId, result);
         return json<AIActionResponse>({ result: result.text });
       }
 
       case 'chatWithBoardAgent': {
         const { message, boardContext } = data as any;
+        const { text: safeMsg } = sanitizeIncomingMessage(String(message || ''), { org_id: profile.organization_id });
         const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
-          prompt: `Persona: ${boardContext?.agentName}. Contexto: ${JSON.stringify(boardContext)}. Msg: ${message}`,
+          prompt: `Persona: ${boardContext?.agentName}. Contexto: ${JSON.stringify(boardContext)}. Msg: ${safeMsg}`,
         });
+        logAIAction(supabase, profile.organization_id, 'chatWithBoardAgent', modelId, result);
         return json<AIActionResponse>({ result: result.text });
       }
 
@@ -480,9 +528,11 @@ Responda em português.`,
         });
         const result = await generateText({
           model,
+          system: SECURITY_PREAMBLE,
           maxRetries: 3,
           prompt,
         });
+        logAIAction(supabase, profile.organization_id, 'generateSalesScript', modelId, result);
         return json<AIActionResponse>({ result: { script: result.text, scriptType, generatedFor: deal?.title } });
       }
 

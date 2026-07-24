@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { authPublicApi } from '@/lib/public-api/auth';
 import { createStaticAdminClient } from '@/lib/supabase/server';
 import { decodeOffsetCursor, encodeOffsetCursor, parseLimit } from '@/lib/public-api/cursor';
+import { sanitizePostgrestValue } from '@/lib/utils/sanitize';
 import { resolveBoardIdFromKey, resolveFirstStageId } from '@/lib/public-api/resolve';
 import { normalizeEmail, normalizePhone, normalizeText } from '@/lib/public-api/sanitize';
 import { isValidUUID, sanitizeUUID } from '@/lib/supabase/utils';
@@ -63,7 +64,10 @@ export async function GET(request: Request) {
   if (contactId) query = query.eq('contact_id', contactId);
   if (clientCompanyId) query = query.eq('client_company_id', clientCompanyId);
   if (updatedAfter) query = query.gte('updated_at', updatedAfter);
-  if (q) query = query.ilike('title', `%${q}%`);
+  if (q) {
+    const safeQ = sanitizePostgrestValue(q)
+    if (safeQ) query = query.ilike('title', `%${safeQ}%`);
+  }
 
   if (status === 'open') query = query.eq('is_won', false).eq('is_lost', false);
   if (status === 'won') query = query.eq('is_won', true);
@@ -72,7 +76,10 @@ export async function GET(request: Request) {
   const from = offset;
   const to = offset + limit - 1;
   const { data, count, error } = await query.range(from, to);
-  if (error) return NextResponse.json({ error: error.message, code: 'DB_ERROR' }, { status: 500 });
+  if (error) {
+    console.error('[API] Database error:', error)
+    return NextResponse.json({ error: 'Internal server error', code: 'DB_ERROR' }, { status: 500 })
+  }
 
   const total = count ?? 0;
   const nextOffset = to + 1;
@@ -213,7 +220,10 @@ export async function POST(request: Request) {
     .insert(insertPayload)
     .select('id,title,value,board_id,stage_id,contact_id,client_company_id,is_won,is_lost,loss_reason,closed_at,created_at,updated_at')
     .single();
-  if (error) return NextResponse.json({ error: error.message, code: 'DB_ERROR' }, { status: 500 });
+  if (error) {
+    console.error('[API] Database error:', error)
+    return NextResponse.json({ error: 'Internal server error', code: 'DB_ERROR' }, { status: 500 })
+  }
 
   return NextResponse.json({ data, action: 'created' }, { status: 201 });
 }

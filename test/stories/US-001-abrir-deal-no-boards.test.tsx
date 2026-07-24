@@ -9,6 +9,15 @@ import { runStorySteps } from './storyRunner';
 // Story: US-001 — Abrir um deal no Boards
 // User Story: Abrir deal no Boards sem crash
 
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    prefetch: vi.fn(),
+    back: vi.fn(),
+  }),
+}));
+
 vi.mock('@/hooks/useResponsiveMode', () => ({
   useResponsiveMode: () => ({ mode: 'desktop' }),
 }));
@@ -23,8 +32,69 @@ vi.mock('@/context/ToastContext', () => ({
   useToast: () => ({ addToast: vi.fn() }),
 }));
 
+vi.mock('@tanstack/react-query', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@tanstack/react-query')>();
+  // Return the deal fixture for DEALS_VIEW_KEY (identified by enabled:false in DealDetailModal)
+  return {
+    ...actual,
+    useQuery: (options: { enabled?: boolean }) => {
+      if (options.enabled === false) {
+        return {
+          data: [{
+            id: 'deal-1',
+            title: 'Pequeno Chapéu',
+            value: 1000,
+            status: 'stage-1',
+            boardId: 'board-1',
+            contactId: 'contact-1',
+            companyName: 'Moreira Comércio',
+            contactName: 'Fulano',
+            contactEmail: 'fulano@example.com',
+            stageLabel: 'Novo',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            probability: 50,
+            priority: 'medium',
+            owner: { name: 'Eu', avatar: '' },
+            tags: [],
+            items: [],
+            customFields: {},
+            isWon: false,
+            isLost: false,
+          }],
+          isLoading: false,
+        };
+      }
+      return { data: [], isLoading: false };
+    },
+  };
+});
+
 vi.mock('@/lib/query/hooks', () => ({
   useMoveDealSimple: () => ({ moveDeal: vi.fn() }),
+  useContacts: () => ({ data: [], isLoading: false }),
+  useActivities: () => ({ data: [], isLoading: false }),
+  useBoards: () => ({ data: [], isLoading: false }),
+  useLifecycleStages: () => ({ data: [], isLoading: false }),
+  useUpdateDeal: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+  useDeleteDeal: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+  useAddDealItem: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+  useRemoveDealItem: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+  useCreateActivity: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+  useUpdateActivity: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+  useDeleteActivity: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+}));
+
+vi.mock('@/lib/query/hooks/useProductsQuery', () => ({
+  useActiveProducts: () => ({ data: [] }),
+}));
+
+vi.mock('@/store/uiState', () => ({
+  useUIState: () => ({ activeBoardId: 'board-1' }),
+}));
+
+vi.mock('@/hooks/usePersistedState', () => ({
+  usePersistedState: (_key: string, initial: unknown) => [initial, vi.fn()],
 }));
 
 vi.mock('@/lib/a11y', () => ({
@@ -56,6 +126,14 @@ vi.mock('@/lib/ai/tasksClient', () => ({
   analyzeLead: vi.fn(),
   generateEmailDraft: vi.fn(),
   generateObjectionResponse: vi.fn(),
+}));
+
+vi.mock('@/features/deals/components/BriefingDrawer', () => ({
+  BriefingDrawer: () => null,
+}));
+
+vi.mock('@/features/deals/components/AIExtractedFields', () => ({
+  AIExtractedFields: () => null,
 }));
 
 vi.mock('@/context/CRMContext', () => ({
